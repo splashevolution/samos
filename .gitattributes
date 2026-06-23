@@ -1,0 +1,10 @@
+# Force LF line endings for all source files
+# (the kernel builds in WSL/Linux — CRLF in .asm/.c/.h/.ld breaks nasm and gcc)
+* text=auto eol=lf
+
+# Binary files — no line ending conversion
+*.iso binary
+*.elf binary
+*.o   binary
+*.stf binary
+*.gguf binary
