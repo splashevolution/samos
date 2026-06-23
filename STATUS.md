@@ -426,6 +426,42 @@ Type 'help' for available commands.
 SAM>
 ```
 
+### Sprint 14 — Kernel Safety Baseline (IDT + Panic + E820 Validation)  ✅
+**Date**: 2026-06-23
+**Goal**: The kernel stops triple-faulting silently. Any CPU exception now shows a
+full panic screen (VGA text + pixel framebuffer overlay + serial) and halts cleanly.
+
+**Files added**:
+| File | Purpose |
+|------|---------|
+| `kernel/panic.h` | `sam_panic()` — red panic screen on VGA text + framebuffer + serial, then HLT |
+| `kernel/idt.h` | 256-entry IDT, 32 per-vector stubs (inline asm), `idt_init()` |
+
+**What Sprint 14 adds**:
+- 256-entry IDT loaded via `lidt` at the very start of `kernel_main`
+- 32 CPU exception stubs covering all x86-64 vectors (0–31); vectors 32–255 get a harmless `iretq` stub
+- Stubs save all 15 GP registers + vector + error_code → `cpu_frame_t`, then call `sam_exception_handler()`
+- `sam_exception_handler()` → `sam_panic()`: displays exception name, vector, error code, RIP, RSP, CR2 (for #PF)
+- Panic overlay drawn on pixel framebuffer if `g_fb.ready`, always on VGA text and serial
+- E820 memory map validation: multiboot2 mmap tag parsed before domain allocation; domains overlapping
+  reserved/ACPI/bad memory emit `[WARN]` and are skipped rather than silently corrupting hardware state
+- Before Sprint 14: any #GP or #PF → instant triple-fault, screen goes black
+- After Sprint 14: red panic screen with full fault context — same experience as a Linux kernel oops
+
+**Serial output on panic (example #GP)**:
+```
+============================================================
+  *** SAM OS KERNEL PANIC ***
+============================================================
+  Exception : #GP General Protection
+  Vector    : 13
+  Err code  : 0x0000000000000000
+  RIP       : 0x000000000010ABCD
+  RSP       : 0x0000000000200FF0
+  System halted.
+============================================================
+```
+
 ---
 
 ## Roadmap
@@ -434,8 +470,8 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 
 | Phase | Goal | Status |
 |-------|------|--------|
-| 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | 🔄 In progress |
-| 2 — Kernel safety | Exception handlers, panic, bounds checks | Planned |
+| 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
+| 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
 | 3 — Hardware | ACPI, full PCI scan, ATA/AHCI disk, USB HID | Planned |
 | 4 — App model | VFS, initrd, syscall ABI, ring-3 process | Planned |
 | 5 — Inference | Real model end-to-end on bare metal | Future |

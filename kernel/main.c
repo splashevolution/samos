@@ -1,6 +1,6 @@
 /*
  * SAM OS -- kernel/main.c
- * Sprint 1-10 bare metal kernel
+ * Sprint 14: Phase 2 — kernel safety baseline
  * No libc. No external dependencies.
  */
 
@@ -12,8 +12,17 @@
 #include "mcp.h"
 #include "fb.h"
 #include "boot_config.h"
+#include "panic.h"      /* sam_panic() — must precede idt.h */
+#include "idt.h"        /* idt_init(), IDT_DEFINE_STUBS() */
 #include "wizard.h"
 #include "shell.h"
+
+/*
+ * Define all 32 ISR stubs + _isr_common in the .text section.
+ * This macro emits one large __asm__() block and must appear exactly once,
+ * at file scope, before kernel_main is called.
+ */
+IDT_DEFINE_STUBS()
 
 /* -- Canonical global definitions (declared extern in headers) -- */
 int               sam_simd_level = SAM_SIMD_SCALAR;
@@ -222,7 +231,7 @@ static void domain_print(const sam_domain_t *d, uint16_t colour) {
 static void print_banner(void) {
     vga_puts("============================================================\n", VGA_CYAN);
     vga_puts("  SAM OS  v0.1.0  |  Structured Adaptive Machine\n",            VGA_WHITE);
-    vga_puts("  Proof-Native Kernel  |  Sprint 13  |  2026\n",                VGA_WHITE);
+    vga_puts("  Proof-Native Kernel  |  Sprint 14  |  2026\n",                VGA_WHITE);
     vga_puts("============================================================\n", VGA_CYAN);
     vga_puts("\n", VGA_WHITE);
 }
@@ -237,8 +246,15 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     print_banner();
     serial_puts("============================================================\n");
     serial_puts("  SAM OS  v0.1.0  |  Structured Adaptive Machine\n");
-    serial_puts("  Proof-Native Kernel  |  Sprint 13  |  2026\n");
+    serial_puts("  Proof-Native Kernel  |  Sprint 14  |  2026\n");
     serial_puts("============================================================\n\n");
+
+    /* Sprint 14: Install IDT — must happen before any code that can fault.
+     * From this point on, a #GP or #PF will show the panic screen instead
+     * of triple-faulting silently. */
+    idt_init();
+    serial_puts("[OK] Sprint 14: IDT installed — 32 exception vectors active\n");
+    vga_puts("[OK] Sprint 14: IDT installed\n", VGA_GREEN);
 
     /* Sprint 10-A: MCP hardware scan
      * PIT calibration runs first (needed by mcp_scan_cpu for cpu_mhz).
@@ -323,16 +339,98 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     serial_puts("     AVX  : "); serial_puts(has_avx  ? "YES\n":"NO\n");
     serial_puts("     AVX2 : "); serial_puts(has_avx2 ? "YES\n":"NO\n");
 
+    /* 3. Sprint 14: Validate domains against multiboot2 memory map (E820)
+     *
+     * Multiboot2 memory map tag (type 6) contains E820 entries.
+     * Each entry: base_addr(u64), length(u64), type(u32), reserved(u32).
+     * Type 1 = available RAM.  We require each domain to be fully covered
+     * by at least one type-1 entry.  A domain that overlaps reserved/ACPI/
+     * bad memory is skipped with a [WARN] rather than causing silent corruption.
+     *
+     * Multiboot2 tag header: type(u32), size(u32), entry_size(u32), entry_version(u32)
+     * Followed by entry_count = (size - 16) / entry_size entries.
+     */
+    typedef struct {
+        uint32_t type; uint32_t size;
+        uint32_t entry_size; uint32_t entry_version;
+    } __attribute__((packed)) mb2_mmap_hdr_t;
+
+    typedef struct {
+        uint64_t base_addr;
+        uint64_t length;
+        uint32_t entry_type;   /* 1=available, 2=reserved, 3=ACPI, 4=NVS, 5=bad */
+        uint32_t reserved;
+    } __attribute__((packed)) mb2_mmap_entry_t;
+
+    /* Walk multiboot2 tags to find the memory map */
+    mb2_mmap_hdr_t *mmap_tag = NULL;
+    {
+        uint8_t *p = (uint8_t *)(uintptr_t)(multiboot_info + 8); /* skip fixed header */
+        uint8_t *end = p + 8192; /* safety limit — real size from mb2 header[0] */
+        while (p < end) {
+            uint32_t tag_type = *(uint32_t *)p;
+            uint32_t tag_size = *(uint32_t *)(p + 4);
+            if (tag_type == 0) break;       /* end tag */
+            if (tag_type == 6) { mmap_tag = (mb2_mmap_hdr_t *)p; break; }
+            p += (tag_size + 7) & ~7u;     /* tags are 8-byte aligned */
+        }
+    }
+
+    /* Helper: returns 1 if [base, base+size) is fully covered by a type-1 entry */
+    #define DOMAIN_IN_RAM(base, sz) ({ \
+        int _ok = 0; \
+        if (mmap_tag) { \
+            uint8_t *_ep = (uint8_t *)mmap_tag + sizeof(mb2_mmap_hdr_t); \
+            uint8_t *_ee = (uint8_t *)mmap_tag + mmap_tag->size; \
+            uint32_t _es = mmap_tag->entry_size; \
+            while (_ep + _es <= _ee) { \
+                mb2_mmap_entry_t *_e = (mb2_mmap_entry_t *)_ep; \
+                if (_e->entry_type == 1 && \
+                    _e->base_addr <= (base) && \
+                    _e->base_addr + _e->length >= (base) + (sz)) \
+                    { _ok = 1; break; } \
+                _ep += _es; \
+            } \
+        } else { \
+            _ok = 1; /* no mmap tag — skip validation, trust bootloader */ \
+        } \
+        _ok; \
+    })
+
+    if (mmap_tag) {
+        serial_puts("[OK] Sprint 14: E820 memory map found, validating domains\n");
+        vga_puts("[OK] Sprint 14: E820 memory map found\n", VGA_GREEN);
+    } else {
+        serial_puts("[WARN] Sprint 14: No E820 memory map tag — skipping domain validation\n");
+        vga_puts("[WARN] Sprint 14: No E820 map\n", VGA_YELLOW);
+    }
+
     /* 3. Allocate three PSL-style memory domains (Sprint 8 adds GENERAL) */
     vga_puts("\n[OK] Allocating memory domains:\n", VGA_GREEN);
     serial_puts("\n[OK] Allocating memory domains:\n");
 
-    int r_ai      = domain_alloc(DOMAIN_AI,      bcfg.ai_base,
-                                 bcfg.ai_size,      "AI-INFERENCE");
-    int r_game    = domain_alloc(DOMAIN_GAME,    bcfg.game_base,
-                                 bcfg.game_size,    "GAME-ENGINE");
-    int r_general = domain_alloc(DOMAIN_GENERAL, bcfg.general_base,
-                                 bcfg.general_size, "GENERAL-APP");
+    int r_ai = -3, r_game = -3, r_general = -3;
+
+    if (DOMAIN_IN_RAM(bcfg.ai_base, bcfg.ai_size)) {
+        r_ai = domain_alloc(DOMAIN_AI, bcfg.ai_base, bcfg.ai_size, "AI-INFERENCE");
+    } else {
+        serial_puts("[WARN] AI domain overlaps reserved memory — skipped\n");
+        vga_puts("[WARN] AI domain in reserved RAM — skipped\n", VGA_YELLOW);
+    }
+
+    if (DOMAIN_IN_RAM(bcfg.game_base, bcfg.game_size)) {
+        r_game = domain_alloc(DOMAIN_GAME, bcfg.game_base, bcfg.game_size, "GAME-ENGINE");
+    } else {
+        serial_puts("[WARN] GAME domain overlaps reserved memory — skipped\n");
+        vga_puts("[WARN] GAME domain in reserved RAM — skipped\n", VGA_YELLOW);
+    }
+
+    if (DOMAIN_IN_RAM(bcfg.general_base, bcfg.general_size)) {
+        r_general = domain_alloc(DOMAIN_GENERAL, bcfg.general_base, bcfg.general_size, "GENERAL-APP");
+    } else {
+        serial_puts("[WARN] GENERAL domain overlaps reserved memory — skipped\n");
+        vga_puts("[WARN] GENERAL domain in reserved RAM — skipped\n", VGA_YELLOW);
+    }
 
     for (int i = 0; i < domain_count; i++) {
         const char *h = "0123456789ABCDEF";
@@ -759,14 +857,14 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         vga_puts(bcfg.mode_name, VGA_CYAN);
         vga_puts("  (dynamic domains)\n", VGA_GREEN);
         vga_puts("[SAM OS] STF model     : loaded (format-agnostic)\n",    VGA_GREEN);
-        vga_puts("[SAM OS] Sprint 13 PASS -- Graphical OOBE Wizard + Kernel Shell ready\n", VGA_GREEN);
+        vga_puts("[SAM OS] Sprint 14 PASS -- IDT + Panic screen + E820 domain validation\n", VGA_GREEN);
         serial_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n");
         serial_puts("[SAM OS] Boot wizard   : ");
         serial_puts(g_fb.ready ? "shown  (pixel framebuffer)\n" : "shown  (VGA text wizard)\n");
         serial_puts("[SAM OS] Boot mode     : "); serial_puts(bcfg.mode_name);
         serial_puts("  (dynamic domains)\n");
         serial_puts("[SAM OS] STF model     : loaded (format-agnostic)\n");
-        serial_puts("[SAM OS] Sprint 13 PASS -- Graphical OOBE Wizard + Kernel Shell ready\n");
+        serial_puts("[SAM OS] Sprint 14 PASS -- IDT + Panic screen + E820 domain validation\n");
     } else {
         vga_puts("[SAM OS] Sprint 13 FAIL\n", VGA_RED);
         serial_puts("[SAM OS] Sprint 13 FAIL\n");
