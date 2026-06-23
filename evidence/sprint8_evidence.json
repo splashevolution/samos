@@ -1,0 +1,119 @@
+{
+  "sprint": 8,
+  "date": "2026-06-21",
+  "hardware": {
+    "machine": "Sony VAIO VPCEB15FX",
+    "cpu": "Intel Core i5 M430",
+    "cpu_mhz_measured": 2128,
+    "cpu_ghz_display": "2.12",
+    "sse42": true,
+    "avx": false,
+    "avx2": false,
+    "ram_mb": 256
+  },
+  "build": {
+    "compiler": "gcc",
+    "flags": "-m64 -std=c11 -ffreestanding -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -msse4.2 -O2 -fno-tree-vectorize -Wall -Wextra",
+    "warnings": 0,
+    "errors": 0,
+    "assembler": "nasm -f elf64",
+    "bootloader": "GRUB2 multiboot2"
+  },
+  "environment": "QEMU x86_64 KVM (-enable-kvm -cpu host -m 256M -display none -serial mon:stdio)",
+  "sprint8_goals": [
+    "GENERAL domain (id=0x30, base=130 MiB, size=64 MiB)",
+    "PIT channel-2 wall-clock CPU frequency calibration",
+    "Three-way cooperative scheduler (AI -> GAME -> GENERAL round-robin)",
+    "Sentinel proof: unique magic written/read-back in each domain",
+    "Scheduler proof: 3 quanta in 1 tick across all domains"
+  ],
+  "results": {
+    "multiboot2_handshake": "PASS",
+    "domain_allocation": {
+      "ai":      { "id": "0x10", "base": "0x0000000000200000", "size_mib": 64, "status": "PASS" },
+      "game":    { "id": "0x20", "base": "0x0000000004200000", "size_mib": 64, "status": "PASS" },
+      "general": { "id": "0x30", "base": "0x0000000008200000", "size_mib": 64, "status": "PASS" }
+    },
+    "domain_isolation": "PASS — no overlap detected",
+    "simd_path": "SSE4.2 (128-bit)",
+    "int8_dot_product": { "result": 528, "expected": 528, "status": "PASS" },
+    "int8_matmul_4x32x32x4": {
+      "C00": 32, "C03": 32, "C30": 32, "C33": 32,
+      "expected": 32, "status": "PASS"
+    },
+    "throughput_benchmark": {
+      "shape": "32x128 x 128x32",
+      "iterations": 100,
+      "tsc_ticks": 44466380,
+      "total_ops": 26214400,
+      "pit_10ms_ticks": 21284156,
+      "cpu_mhz": 2128,
+      "calibration": "PIT channel-2 one-shot ~10ms window",
+      "ops_per_tick": "0.58",
+      "throughput_gops": "1.25",
+      "status": "PASS"
+    },
+    "gguf_header_parse": {
+      "module_addr": "0x000000000010E000",
+      "module_size_bytes": 292,
+      "magic": "GGUF",
+      "version": 3,
+      "tensor_count": 2,
+      "metadata_kv_count": 3,
+      "status": "PASS"
+    },
+    "pong_game": {
+      "domain": "0x4200000 (GAME)",
+      "pic_remapped": true,
+      "idt_installed": true,
+      "pit_60hz": true,
+      "exit": "auto after 300 ticks (headless CI mode)",
+      "status": "PASS"
+    },
+    "sprint8_sentinels": {
+      "ai_magic":      { "written": "0xA1A1A1A1", "readback": "0x00000000A1A1A1A1", "status": "PASS" },
+      "game_magic":    { "written": "0xCAFECAFE", "readback": "0x00000000CAFECAFE", "status": "PASS" },
+      "general_magic": { "written": "0x6E6E6E6E", "readback": "0x000000006E6E6E6E", "status": "PASS" }
+    },
+    "scheduler": {
+      "type": "cooperative round-robin",
+      "slots": ["AI (0x10)", "GAME (0x20)", "GENERAL (0x30)"],
+      "quanta_per_tick": { "ai": 1, "game": 1, "general": 1 },
+      "total_quanta": 3,
+      "cycles": 1,
+      "status": "PASS"
+    },
+    "sprint8_overall": "PASS"
+  },
+  "serial_tail": [
+    "[OK] Sprint 8: GENERAL domain + three-way scheduler",
+    "     GENERAL domain base : 0x0000000008200000  size=64 MiB",
+    "     AI sentinel      : 0x00000000A1A1A1A1  [PASS]",
+    "     GAME sentinel    : 0x00000000CAFECAFE  [PASS]",
+    "     GENERAL sentinel : 0x000000006E6E6E6E  [PASS]",
+    "     Scheduler quanta : 3  [PASS] all 3 domains scheduled",
+    "     Scheduler cycles : 1",
+    "     [domain 0x10] AI : 1 quanta",
+    "     [domain 0x20] GAME : 1 quanta",
+    "     [domain 0x30] GEN : 1 quanta",
+    "     [PASS] Sprint 8: three-domain isolation + scheduler",
+    "============================================================",
+    "[SAM OS] AI domain     : ready  (id=0x10, 64 MiB)",
+    "[SAM OS] Game domain   : ready  (id=0x20, 64 MiB)",
+    "[SAM OS] General domain: ready  (id=0x30, 64 MiB)",
+    "[SAM OS] Sprint 8 PASS -- three-domain kernel",
+    "============================================================"
+  ],
+  "files_changed": [
+    "kernel/main.c   -- GENERAL domain, PIT calibration, sentinel proof, scheduler wired",
+    "kernel/scheduler.h -- NEW: three-way cooperative scheduler",
+    "kernel/game.h   -- headless 300-tick auto-exit guard",
+    "STATUS.md       -- Sprint 8 section, PSL liveness row updated",
+    "evidence/sprint8_evidence.json -- this file"
+  ],
+  "psl_correspondence": {
+    "global_liveness": "cooperative round-robin, one quantum per domain per tick — Sprint 8 implementation",
+    "hypervisor_isolation": "overlap check in domain_alloc(); no hardware MMU boundary yet"
+  },
+  "next_sprint": "Sprint 9 — GPT-2 small Q8_0 inference: load real weights into AI domain, first forward pass token"
+}

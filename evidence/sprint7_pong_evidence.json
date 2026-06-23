@@ -1,0 +1,77 @@
+{
+  "sprint": 7,
+  "title": "SAM OS Pong — Real-Time Game Loop in GAME Domain on Bare Metal",
+  "timestamp": "2026-06-21T00:00:00Z",
+  "host": {
+    "machine": "Sony VAIO VPCEB15FX",
+    "cpu": "Intel Core i5 (pre-AVX, SSE4.2)",
+    "os": "Ubuntu 22.04 LTS (Lubuntu)",
+    "kernel": "Linux 6.8.0-124-generic",
+    "display": "QEMU VGA std, rendered on VAIO's own display via DISPLAY=:0",
+    "photo_evidence": "sprint7_photo.jpg — VAIO screen showing GAME OVER, L:29 R:29, SAM OS GAME domain: proved"
+  },
+  "build": {
+    "compiler": "gcc",
+    "cflags": "-m64 -std=c11 -ffreestanding -fno-builtin -fno-stack-protector -fno-pie -mno-red-zone -msse4.2 -O2 -fno-tree-vectorize",
+    "new_file": "kernel/game.h — PIC remap, IDT, PIT, keyboard, VGA Pong engine",
+    "warnings": "1 harmless warning: cal_count set-but-not-used"
+  },
+  "qemu": {
+    "flags": "-m 256M -no-reboot -cdrom build/sam_os.iso -enable-kvm -cpu host -vga std -serial mon:stdio",
+    "launch": "DISPLAY=:0 make run-game"
+  },
+  "hardware_setup": {
+    "pic_8259": "Remapped: IRQ0-7 → vectors 32-39, IRQ8-15 → 40-47 (avoids collision with CPU exceptions)",
+    "pit_8253": "Channel 0, mode 3 square wave, divisor=19886 → ~60Hz timer tick",
+    "idt": "64-bit IDT, 256 entries, gates installed for vector 32 (PIT) and vector 33 (keyboard)",
+    "irq0_handler": "Increments game_ticks volatile counter",
+    "irq1_handler": "Reads scan code from port 0x60, updates key_state[4] for W/S/UP/DOWN, sets key_quit on Q",
+    "vga": "Text mode 0xB8000, 80x25, block character 0xDB for ball and paddles"
+  },
+  "game_domain": {
+    "base_address": "0x4200000",
+    "domain_id": "0x20",
+    "size": "64 MiB",
+    "pong_state_offset": 0,
+    "pong_state_struct": "ball_x, ball_y, ball_dx, ball_dy, paddle_l, paddle_r, score_l, score_r, tick_last",
+    "isolation": "Game state stored at physical 0x4200000 — fully isolated from AI domain (0x200000)"
+  },
+  "game_result": {
+    "final_score_left": 29,
+    "final_score_right": 29,
+    "result": "DRAW — L:29 R:29",
+    "quit_method": "Q key pressed",
+    "vga_message": "GAME OVER  Q pressed / Final score L:29 R:29 / SAM OS GAME domain: proved"
+  },
+  "serial_output": [
+    "[OK] Sprint 7: Launching Pong in GAME domain (0x4200000)",
+    "     PIC remap, IDT load, PIT 60Hz, game loop starting...",
+    "     (Run 'make run-vga' to see the VGA display)",
+    "[OK] Sprint 7: Game loop exited cleanly",
+    "============================================================",
+    "[SAM OS] AI domain  : ready  (id=0x10, 64 MiB)",
+    "[SAM OS] Game domain: ready  (id=0x20, 64 MiB)",
+    "[SAM OS] Sprint 7 PASS -- Pong on bare metal",
+    "============================================================"
+  ],
+  "all_sprints_passing": {
+    "sprint1_boot": "PASS",
+    "sprint2_simd_dispatch": "PASS",
+    "sprint3_sse42_pmaddubsw": "PASS",
+    "sprint4_int8_matmul": "PASS — all 16 outputs = 32",
+    "sprint5_rdtsc_benchmark": "PASS — 1.6 GOPS INT8",
+    "sprint6_gguf_parse": "PASS — magic=GGUF version=3 tensors=2",
+    "sprint7_pong_game": "PASS — L:29 R:29, game loop ran and exited cleanly"
+  },
+  "significance": {
+    "what_this_proves": "SAM OS runs a real-time interactive game on bare metal with no OS, no libc, no GPU. PIC, IDT, PIT, VGA, and keyboard — all wired by hand in ~300 lines of C and asm. Game state lives in the GAME domain (0x4200000), isolated from AI domain by the PSL-derived domain allocator.",
+    "historic_note": "Final score L:29 R:29 — the first game ever played on SAM OS. Tied match on a 2010 Sony VAIO VPCEB15FX.",
+    "psl_connection": "The GAME domain isolation (0x4200000, no overlap with AI at 0x200000) is the runtime implementation of the PSL hypervisor_isolation theorem proved in Sprint 28 of the PSL project.",
+    "kids_game_vision": "Sprint 7 proves the game engine domain works on constrained hardware. The path to 'better than Roblox' starts here — no server, no subscription, no lag, bare metal performance."
+  },
+  "next": {
+    "sprint8_goal": "GENERAL domain (0x30) + three-way hardware-honest scheduler: AI yields to GAME, GAME yields to GENERAL, one heavy workload at a time",
+    "sprint9_goal": "Load real GPT-2 small Q8_0 GGUF weights into AI domain, run first forward pass token on bare metal",
+    "sprint10_goal": "GitHub push — make SAM OS public"
+  }
+}

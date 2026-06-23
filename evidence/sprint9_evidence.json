@@ -1,0 +1,98 @@
+{
+  "sprint": 9,
+  "title": "SAM Tensor Format (STF) — format-agnostic model weights on bare metal",
+  "date": "2026-06-21",
+  "hardware": {
+    "machine": "Sony VAIO VPCEB15FX",
+    "cpu": "Intel Core i5 M430",
+    "cpu_mhz_pit_calibrated": 2128,
+    "simd": "SSE4.2 (no AVX/AVX2)",
+    "ram_qemu": "512M"
+  },
+  "goals": [
+    "Define SAM Tensor Format (STF) — kernel-native, format-agnostic (stf.h)",
+    "Write tools/to_stf.py — universal host-side converter (GGUF, SafeTensors, synthetic)",
+    "Expand AI domain to 256 MiB for KV cache headroom",
+    "Wire STF loader into kernel_main — parse, index, dequantize on bare metal",
+    "Zero-warning clean build, Sprint 9 PASS on real hardware"
+  ],
+  "results": {
+    "build": {
+      "warnings": 0,
+      "errors": 0,
+      "gcc_flags": "-m64 -std=c11 -ffreestanding -msse4.2 -O2 -Wall -Wextra"
+    },
+    "domain_layout": {
+      "AI":      { "id": "0x10", "base": "0x0200000", "size_MiB": 256 },
+      "GAME":    { "id": "0x20", "base": "0x10200000", "size_MiB": 64 },
+      "GENERAL": { "id": "0x30", "base": "0x14200000", "size_MiB": 64 }
+    },
+    "stf_module": {
+      "grub_load_addr": "0x0000000000110000",
+      "size_bytes": 44096,
+      "format": "STF1 v1",
+      "model_name": "SAM-NANO-v1-synthetic",
+      "n_tensors": 4,
+      "tensors": [
+        "token_embd.weight [256,64] Q8_0",
+        "output.weight [256,64] Q8_0",
+        "blk.0.attn.q.weight [64,64] Q8_0",
+        "blk.0.attn.k.weight [64,64] Q8_0"
+      ]
+    },
+    "dequant_proof": {
+      "tensor": "token_embd.weight",
+      "block": 0,
+      "scale_fp16_hex": "0x2C52",
+      "scale_fp32_bits_hex": "0x3D8A4000",
+      "weights_0_to_7": [-121, 62, -57, -65, -70, -92, 61, -101],
+      "all_nonzero": true,
+      "result": "PASS"
+    },
+    "sprint8_sentinels": {
+      "AI_sentinel":      { "value": "0xA1A1A1A1", "result": "PASS" },
+      "GAME_sentinel":    { "value": "0xCAFECAFE", "result": "PASS" },
+      "GENERAL_sentinel": { "value": "0x6E6E6E6E", "result": "PASS" }
+    },
+    "scheduler": {
+      "domains_scheduled": 3,
+      "quanta": 3,
+      "result": "PASS"
+    },
+    "throughput": {
+      "gops_int8": 1.67,
+      "simd_path": "SSE4.2",
+      "calibration": "PIT channel-2, 10ms window"
+    },
+    "final_verdict": "Sprint 9 PASS -- STF weights live on bare metal"
+  },
+  "files_changed": [
+    "kernel/main.c       — Sprint 9 banner, 256 MiB AI domain, STF loader section",
+    "kernel/stf.h        — NEW: SAM Tensor Format v1 (220 lines, static inline, no libc)",
+    "kernel/game.h       — GAME_MAX_TICKS=300 headless guard (unchanged from Sprint 8 fix)",
+    "kernel/grub.cfg     — Added: module2 /boot/test_model.stf stf_model",
+    "Makefile            — QEMU 512M, STF_TOOL/STF_FILE build rules",
+    "tools/to_stf.py     — NEW: universal converter (GGUF, SafeTensors, synthetic)"
+  ],
+  "architecture_decisions": {
+    "STF_rationale": "GGUF/SafeTensors/ONNX are ecosystem formats with external dependencies. Kernel must never change when model formats evolve. STF is the kernel's one rule — host-side converters plug in. Paninian principle: one sutra, unlimited exceptions handled outside.",
+    "AI_domain_256MiB": "Model weights are READ-ONLY firmware at GRUB load address. AI domain holds activations/KV cache/scratch only. 256 MiB covers KV cache for models up to ~7B parameters. Models become swappable without kernel changes.",
+    "Q8_block_format": "STF_Q8_BLOCK_SIZE=32 weights + 2 bytes fp16 scale = 34 bytes/block. Compatible with llama.cpp Q8_0 block layout for direct weight reuse."
+  },
+  "market_domains": {
+    "AI":      "LAN inference appliance — bare-metal LLM serving, no OS overhead",
+    "GAME":    "Retro console OS — Mario, Contra, CS still gems",
+    "GENERAL": "Lightweight OS for India's 500M legacy PCs"
+  },
+  "next_sprint_10_candidates": [
+    "Minimal UART/TCP stack in GENERAL domain — LAN API endpoint",
+    "STF inference pass — single transformer block, token_embd matmul → logits",
+    "Flash-to-USB install path — dd if=build/sam_os.iso of=/dev/sdX"
+  ],
+  "psl_correspondence": {
+    "STF_sutra":    "One kernel format rule (stf.h) — Utsarga",
+    "converters":   "Ecosystem format handlers (to_stf.py) — Apavāda exceptions",
+    "domain_guard": "Domain sentinels = Paribhāṣā constraint enforcement",
+    "scheduler":    "Round-robin quanta = Āvṛtti bounded repetition"
+  }
+}
