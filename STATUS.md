@@ -483,6 +483,36 @@ full panic screen (VGA text + pixel framebuffer overlay + serial) and halts clea
 
 ---
 
+### Sprint 16 — Phase 4: VFS + initrd + Syscalls + First Ring-3 Process  ✅
+**Date**: 2026-08-23
+**Goal**: Run a second piece of code that is not the kernel — the app model exists.
+
+**Files added / modified**:
+| File | Purpose |
+|------|---------|
+| `kernel/vfs.h` | In-memory VFS over a USTAR initrd: parse, open/read/close, exact-name lookup |
+| `kernel/syscall.h` | `int 0x80` gate (DPL=3): `write(1)`, `exit(2)`, `read(3)` |
+| `kernel/userasm.asm` | `_user_enter`/`_user_exit` ring-3 trampolines (iretq in, kernel-stack restore out) |
+| `user/hello.asm` | **The first SAM OS user process** — flat binary at 0x19000000, prints via syscall, exits |
+| `kernel/idt.h` | `idt_set_gate_dpl()`; vector 0x80 installed with DPL=3; `_syscall80` stub |
+| `kernel/boot.asm` | GDT gains user code (0x1B) + user data (0x23) segments, DPL=3 |
+| `kernel/grub.cfg` | New module: `/boot/initrd.tar "initrd"` |
+| `Makefile` | `hello.bin` → ustar `build/initrd.tar`; new test marker |
+
+**Syscall ABI (frozen for Sprint 16)**:
+```
+rax = syscall nr | rdi = arg0 | rsi = arg1 | rdx = arg2 | result in rax
+  1 = write(fd, buf, len)   fd=1 only (COM1 serial), returns len
+  2 = exit(code)            never returns; kernel resumes
+  3 = read(fd, buf, len)    returns 0 (EOF) until stdin is wired
+```
+
+**Honest scope**: one user task, no page-table isolation yet (ring 3 blocks
+privileged instructions but not memory access), flat-binary executables (not ELF),
+no preemption. Per-task CR3 and an ELF subset loader are the next Phase 4 steps.
+
+---
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
@@ -492,7 +522,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 | 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
 | 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
 | 3 — Hardware | ACPI, PS/2 IRQ keyboard, ATA PIO disk | ✅ Done (Sprint 15); full PCI scan + USB HID remain |
-| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | Planned |
+| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 Started (Sprint 16); next: per-task CR3, ELF loader, preemption |
 | 5 — Inference | Real model end-to-end on bare metal | Future |
 | 6 — Compatibility | SAM ABI → Lua → WASM → Linux compat | Far future |
 

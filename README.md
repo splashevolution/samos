@@ -18,7 +18,7 @@ A Core i5 with SSE4.2 can do meaningful INT8 matrix math in bare-metal mode. Nob
 
 ---
 
-## What Exists Today (Sprint 15)
+## What Exists Today (Sprint 16)
 
 - **Multiboot2 boot** — GRUB2 → 64-bit long mode, identity-mapped 4 GiB, SSE/FPU initialised
 - **Graphical OOBE wizard** — 1024×768 pixel GUI (Bochs VBE direct I/O), dark sidebar, hostname/WiFi setup
@@ -28,9 +28,10 @@ A Core i5 with SSE4.2 can do meaningful INT8 matrix math in bare-metal mode. Nob
 - **Kernel safety** — all 32 CPU exception handlers, panic screen, E820 memory-map validation (Sprint 14)
 - **Real hardware** — ACPI table parsing, IRQ-driven PS/2 keyboard, ATA PIO disk read (Sprint 15)
 - **Kernel shell** — PS/2 keyboard, `help`, `info`, `setup` commands
+- **First user process** — initrd (ustar) VFS, `int 0x80` syscall gate (`write`/`exit`/`read`), ring-3 hello world (Sprint 16)
 - **STF model format** — synthetic tensor loader for AI domain; proof-of-concept, not real inference
 
-**Not present yet:** process isolation, filesystem, storage driver, network stack, real model inference, user mode (ring 3), Android/WSL compatibility.
+**Not present yet:** memory isolation between processes (per-task CR3), filesystem writeback, storage driver integration with VFS, network stack, real model inference, preemption, ELF loader.
 
 ---
 
@@ -43,7 +44,7 @@ See [ROADMAP.md](ROADMAP.md) for the full plan. Summary:
 | 1 | Truth stabilization — docs, reproducible build, `make test` | ✅ Done |
 | 2 | Kernel safety — exception handlers, panic screen, bounds checks | ✅ Done (Sprint 14) |
 | 3 | Real hardware — ACPI, full PCI scan, ATA/AHCI disk, USB HID | ✅ Mostly done (Sprint 15); full PCI scan + USB HID remain |
-| 4 | Storage + app model — VFS, initrd, syscall ABI, first ring-3 process | Planned |
+| 4 | Storage + app model — VFS, initrd, syscall ABI, first ring-3 process | 🔄 Started (Sprint 16) |
 | 5 | Real inference — tokenizer, transformer forward pass, next-token loop | Future |
 | 6 | Compatibility — SAM ABI → Lua → WASM → JVM subset → Linux compat | Far future |
 

@@ -67,14 +67,19 @@ typedef struct {
 /* ── The IDT (file-scope, referenced by idt_init) ─────────────────────── */
 static idt_gate_t idt_table[256];
 
-/* ── Helper: install one gate ─────────────────────────────────────────── */
+/* ── Helper: install one gate (DPL=0) ─────────────────────────────────── */
 static inline void idt_set_gate(int vec, void (*handler)(void)) {
+    idt_set_gate_dpl(vec, handler, 0);
+}
+
+/* ── Helper: install one gate with a given privilege level ────────────── */
+static inline void idt_set_gate_dpl(int vec, void (*handler)(void), uint8_t dpl) {
     uint64_t addr = (uint64_t)handler;
     idt_gate_t *g = &idt_table[vec];
     g->offset_lo  = (uint16_t)(addr & 0xFFFF);
     g->selector   = 0x08;               /* GDT_CODE64 */
     g->ist        = 0;
-    g->type_attr  = 0x8E;               /* present, DPL=0, 64-bit interrupt gate */
+    g->type_attr  = (uint8_t)(0x80 | (dpl << 5) | 0x0E);   /* present, 64-bit interrupt gate */
     g->offset_mid = (uint16_t)((addr >> 16) & 0xFFFF);
     g->offset_hi  = (uint32_t)((addr >> 32) & 0xFFFFFFFF);
     g->zero       = 0;
@@ -164,6 +169,8 @@ DECL_ISR(24) DECL_ISR(25) DECL_ISR(26) DECL_ISR(27)
 DECL_ISR(28) DECL_ISR(29) DECL_ISR(30) DECL_ISR(31)
 /* Generic stub for vectors 32-255 (hardware IRQs we don't handle yet) */
 extern void _isr_generic(void);
+/* Sprint 16: int 0x80 syscall gate (DPL=3, callable from ring 3) */
+extern void _syscall80(void);
 
 /*
  * Define all stubs via a single large inline asm block.
@@ -197,7 +204,7 @@ __asm__ ( \
     /* Align stack to 16 bytes for System V ABI */ \
     "and $-16, %rsp\n\t" \
     "sub $8, %rsp\n\t"   \
-    "call sam_exception_handler\n\t" \
+    "call sam_interrupt_dispatcher\n\t" \
     "add $8, %rsp\n\t"   \
     "mov %rdi, %rsp\n\t" \
     /* Restore GP regs */ \
@@ -261,6 +268,8 @@ __asm__ ( \
 "_isr31:\n\t" "push $0\n\t" "push $31\n\t" "jmp _isr_common\n\t" \
 /* Generic stub for hardware IRQs 32-255: just iretq */ \
 "_isr_generic:\n\t" "iretq\n\t" \
+/* Sprint 16: int 0x80 syscall stub — same frame layout as exceptions   */ \
+"_syscall80:\n\t" "push $0\n\t" "push $128\n\t" "jmp _isr_common\n\t" \
 );
 
 /* ── idt_init: install all gates and load the IDT ─────────────────────── */
@@ -286,6 +295,9 @@ static void idt_init(void) {
     /* Hardware IRQ vectors 32-255: point to generic stub (just iretq) */
     for (int i = 32; i < 256; i++)
         idt_set_gate(i, _isr_generic);
+
+    /* Sprint 16: int 0x80 syscall gate — DPL=3 so ring-3 code can raise it */
+    idt_set_gate_dpl(0x80, _syscall80, 3);
 
     /* Load the IDT */
     idtr_t idtr;

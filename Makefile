@@ -60,10 +60,10 @@ LDFLAGS  := -m elf_x86_64 \
              -z max-page-size=0x1000
 
 # ── Sources ───────────────────────────────────────────────────
-ASM_SRC  := kernel/boot.asm
+ASM_SRC  := kernel/boot.asm kernel/userasm.asm
 C_SRC    := kernel/main.c
 
-ASM_OBJ  := $(BUILD)/boot.o
+ASM_OBJ  := $(BUILD)/boot.o $(BUILD)/userasm.o
 C_OBJ    := $(BUILD)/main.o
 KERNEL   := $(BUILD)/$(TARGET).elf
 ISO      := $(BUILD)/$(TARGET).iso
@@ -74,12 +74,15 @@ ISO      := $(BUILD)/$(TARGET).iso
 all: $(ISO)
 
 # ── Compile assembly ─────────────────────────────────────────
-$(ASM_OBJ): $(ASM_SRC) | $(BUILD)
+$(BUILD)/boot.o: kernel/boot.asm | $(BUILD)
+	$(ASM) $(ASMFLAGS) $< -o $@
+
+$(BUILD)/userasm.o: kernel/userasm.asm | $(BUILD)
 	$(ASM) $(ASMFLAGS) $< -o $@
 
 # ── Kernel headers (any change triggers C recompile) ─────────
 KERNEL_HEADERS := kernel/mcp.h kernel/fb.h kernel/boot_config.h \
-                  kernel/panic.h kernel/idt.h \
+                  kernel/panic.h kernel/idt.h kernel/syscall.h kernel/vfs.h \
                   kernel/acpi.h kernel/ps2kbd.h kernel/ata.h \
                   kernel/wizard.h kernel/shell.h kernel/simd.h \
                   kernel/scheduler.h kernel/stf.h
@@ -104,10 +107,25 @@ $(GGUF_FILE): $(GGUF_TOOL) | $(BUILD)
 $(STF_FILE): $(STF_TOOL) | $(BUILD)
 	python3 $(STF_TOOL) --synthetic --output $(STF_FILE)
 
-$(ISO): $(KERNEL) $(GGUF_FILE) $(STF_FILE) | $(GRUB_DIR)
+# ── Sprint 16: initrd (ustar) with the first SAM OS user program ─────
+USER_CODE := user/hello.asm
+HELLO_BIN := $(BUILD)/hello.bin
+INITRD    := $(BUILD)/initrd.tar
+
+$(HELLO_BIN): $(USER_CODE) | $(BUILD)
+	nasm -f bin -o $@ $<
+
+$(INITRD): $(HELLO_BIN) | $(BUILD)
+	rm -rf $(BUILD)/initrd
+	mkdir -p $(BUILD)/initrd
+	cp $(HELLO_BIN) $(BUILD)/initrd/hello.bin
+	tar --format=ustar -cf $@ -C $(BUILD)/initrd hello.bin
+
+$(ISO): $(KERNEL) $(GGUF_FILE) $(STF_FILE) $(INITRD) | $(GRUB_DIR)
 	cp $(KERNEL)    $(BOOT_DIR)/$(TARGET).elf
 	cp $(GGUF_FILE) $(BOOT_DIR)/test.gguf
 	cp $(STF_FILE)  $(BOOT_DIR)/test_model.stf
+	cp $(INITRD)    $(BOOT_DIR)/initrd.tar
 	cp kernel/grub.cfg $(GRUB_DIR)/grub.cfg
 	GRUB_MKRESCUE_XORRISO=/usr/bin/xorriso /usr/bin/grub-mkrescue -o $@ $(ISO_DIR)
 	@echo ""
@@ -174,7 +192,7 @@ test: $(ISO)
 	for marker in \
 	    "dot\(\[1\.\.32\]" \
 	    "\[PASS\]" \
-	    "Sprint 15 PASS"; \
+	    "Sprint 16 PASS"; \
 	do \
 	    if grep -qE "$$marker" $(SERIAL_LOG) 2>/dev/null; then \
 	        echo "  [OK]  $$marker"; \

@@ -19,6 +19,7 @@
 #include "ata.h"        /* ata_init(), ata_read_sectors(), sam_ata_t */
 #include "wizard.h"
 #include "shell.h"
+#include "vfs.h"       /* Sprint 16: initrd ustar VFS */
 
 /*
  * Define all 32 CPU exception ISR stubs + _isr_common in the .text section.
@@ -103,6 +104,9 @@ static void serial_putchar(char c) {
 }
 
 static void serial_puts(const char *s)   { while (*s) serial_putchar(*s++); }
+
+/* Sprint 16: syscall gate + ring-3 entry (needs serial_* above) */
+#include "syscall.h"
 
 static void serial_puthex(uint64_t v) {
     const char *h = "0123456789ABCDEF";
@@ -239,7 +243,7 @@ static void domain_print(const sam_domain_t *d, uint16_t colour) {
 static void print_banner(void) {
     vga_puts("============================================================\n", VGA_CYAN);
     vga_puts("  SAM OS  v0.1.0  |  Structured Adaptive Machine\n",            VGA_WHITE);
-    vga_puts("  Proof-Native Kernel  |  Sprint 15  |  2026\n",                VGA_WHITE);
+    vga_puts("  Proof-Native Kernel  |  Sprint 16  |  2026\n",                VGA_WHITE);
     vga_puts("============================================================\n", VGA_CYAN);
     vga_puts("\n", VGA_WHITE);
 }
@@ -254,7 +258,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     print_banner();
     serial_puts("============================================================\n");
     serial_puts("  SAM OS  v0.1.0  |  Structured Adaptive Machine\n");
-    serial_puts("  Proof-Native Kernel  |  Sprint 15  |  2026\n");
+    serial_puts("  Proof-Native Kernel  |  Sprint 16  |  2026\n");
     serial_puts("============================================================\n\n");
 
     /* Sprint 14: Install IDT — must happen before any code that can fault. */
@@ -879,6 +883,85 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
 
     int sprint10_sentinel_ok = s10_ai_ok && s10_gm_ok && s10_gn_ok;
 
+    /* 13. Sprint 16 / Phase 4: VFS + initrd + syscalls + first ring-3 process */
+    vga_puts("\n[OK] Sprint 16: VFS + initrd + ring-3 process\n", VGA_GREEN);
+    serial_puts("\n[OK] Sprint 16: VFS + initrd + ring-3 process\n");
+
+    int sprint16_ok = 0;
+
+    /* Find the initrd module by cmdline prefix "initrd" */
+    uint8_t *rd_tag_ptr = (uint8_t *)(uintptr_t)multiboot_info + 8;
+    mb2_module_tag_t *rd_mod = 0;
+    for (;;) {
+        mb2_tag_t *tag = (mb2_tag_t *)rd_tag_ptr;
+        if (tag->type == MB2_TAG_END) break;
+        if (tag->type == MB2_TAG_MODULE) {
+            const char *cmd = ((mb2_module_tag_t *)rd_tag_ptr)->cmdline;
+            const char *want = "initrd";
+            int match = 1;
+            for (int ci = 0; want[ci]; ci++) {
+                if (cmd[ci] != want[ci]) { match = 0; break; }
+            }
+            if (match) { rd_mod = (mb2_module_tag_t *)rd_tag_ptr; break; }
+        }
+        uint32_t next = (tag->size + 7) & ~7u;
+        if (next == 0) break;
+        rd_tag_ptr += next;
+    }
+
+    if (!rd_mod) {
+        vga_puts("     [WARN] No initrd module found in GRUB\n", VGA_YELLOW);
+        serial_puts("     [WARN] No initrd module found in GRUB\n");
+    } else {
+        uint32_t rd_start = rd_mod->mod_start;
+        uint32_t rd_size  = rd_mod->mod_end - rd_mod->mod_start;
+        serial_puts("     initrd addr : "); serial_puthex(rd_start); serial_puts("\n");
+        serial_puts("     initrd size : "); serial_putdec(rd_size); serial_puts(" bytes\n");
+
+        int nfiles = vfs_init((const void *)(uintptr_t)rd_start, rd_size);
+        if (nfiles < 0) {
+            serial_puts("     [FAIL] vfs_init error: "); serial_putdec((uint64_t)(-nfiles)); serial_puts("\n");
+            vga_puts("     [FAIL] initrd parse\n", VGA_RED);
+        } else {
+            vga_puts("     initrd files: ", VGA_WHITE);
+            vga_putdec((uint64_t)nfiles, VGA_CYAN); vga_puts("\n", VGA_WHITE);
+            serial_puts("     VFS mounted : "); serial_putdec((uint64_t)nfiles); serial_puts(" file(s)\n");
+            for (int fi = 0; fi < nfiles; fi++) {
+                serial_puts("       /"); serial_puts(vfs_files[fi].name);
+                serial_puts("  ("); serial_putdec(vfs_files[fi].size); serial_puts(" bytes)\n");
+            }
+
+            vfs_file_handle_t h;
+            if (vfs_open("/hello.bin", &h) != 0) {
+                serial_puts("     [FAIL] /hello.bin not found in initrd\n");
+                vga_puts("     [FAIL] /hello.bin missing\n", VGA_RED);
+            } else {
+                /* Copy user program to USER_CODE_BASE and enter ring 3.
+                 * Returns only when the task calls exit(2). */
+                uint8_t *udst = (uint8_t *)(uintptr_t)USER_CODE_BASE;
+                int32_t got = vfs_read(&h, udst, 0x00100000u);
+                vfs_close(&h);
+
+                if (got <= 0) {
+                    serial_puts("     [FAIL] vfs_read(/hello.bin) returned "); serial_putdec((uint64_t)got); serial_puts("\n");
+                    vga_puts("     [FAIL] user program read\n", VGA_RED);
+                } else {
+                    serial_puts("     hello.bin loaded at 0x19000000 (");
+                    serial_putdec((uint64_t)got); serial_puts(" bytes)\n");
+                    serial_puts("     Entering ring 3...\n");
+
+                    sam_user_enter(USER_CODE_BASE, USER_STACK_TOP);
+
+                    /* Control returns here after the task calls exit(2). */
+                    sprint16_ok = 1;
+                    vga_puts("     [PASS] ring-3 process ran + exited via syscall\n", VGA_GREEN);
+                    serial_puts("     [PASS] Sprint 16: first SAM OS user process OK\n");
+                }
+            }
+        }
+    }
+
+
     /* 12. Final status */
     vga_puts("\n", VGA_WHITE);
     vga_puts("============================================================\n", VGA_CYAN);
@@ -886,9 +969,9 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
 
     int sprint9_ok = domains_ok && compute_ok && matmul_ok && bench_ok
                    && gguf_ok && sprint8_domain_ok && stf_ok;
-    int sprint10_ok = sprint9_ok && (cfg_ok == 0 || 1) && sprint10_sentinel_ok;
+    int sprint16_gate = sprint9_ok && sprint10_sentinel_ok && sprint16_ok;
 
-    if (sprint10_ok) {
+    if (sprint16_gate) {
         vga_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n",  VGA_GREEN);
         vga_puts("[SAM OS] Boot GUI      : ", VGA_GREEN);
         vga_puts(g_fb.ready ? "shown  (pixel framebuffer)\n" : "shown  (VGA text TUI)\n", VGA_GREEN);
@@ -896,17 +979,19 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         vga_puts(bcfg.mode_name, VGA_CYAN);
         vga_puts("  (dynamic domains)\n", VGA_GREEN);
         vga_puts("[SAM OS] STF model     : loaded (format-agnostic)\n",    VGA_GREEN);
-        vga_puts("[SAM OS] Sprint 15 PASS -- ACPI + PS2 keyboard IRQ + ATA disk + full PCI scan\n", VGA_GREEN);
+        vga_puts("[SAM OS] VFS + initrd  : mounted\n", VGA_GREEN);
+        vga_puts("[SAM OS] Ring 3        : first user process ran\n", VGA_GREEN);
+        vga_puts("[SAM OS] Sprint 16 PASS -- VFS + initrd + syscalls + ring-3 process\n", VGA_GREEN);
         serial_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n");
         serial_puts("[SAM OS] Boot wizard   : ");
         serial_puts(g_fb.ready ? "shown  (pixel framebuffer)\n" : "shown  (VGA text wizard)\n");
         serial_puts("[SAM OS] Boot mode     : "); serial_puts(bcfg.mode_name);
         serial_puts("  (dynamic domains)\n");
         serial_puts("[SAM OS] STF model     : loaded (format-agnostic)\n");
-        serial_puts("[SAM OS] Sprint 15 PASS -- ACPI + PS2 keyboard IRQ + ATA disk + full PCI scan\n");
+        serial_puts("[SAM OS] Sprint 16 PASS -- VFS + initrd + syscalls + ring-3 process\n");
     } else {
-        vga_puts("[SAM OS] Sprint 13 FAIL\n", VGA_RED);
-        serial_puts("[SAM OS] Sprint 13 FAIL\n");
+        vga_puts("[SAM OS] Sprint 16 FAIL\n", VGA_RED);
+        serial_puts("[SAM OS] Sprint 16 FAIL\n");
     }
 
     vga_puts("============================================================\n", VGA_CYAN);

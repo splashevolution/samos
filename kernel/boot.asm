@@ -288,6 +288,12 @@ gdt64:
     ; Data segment (64-bit): read/write, DPL=0
     dq 0x00CF92000000FFFF
 
+    ; Sprint 16 — user code segment (64-bit): DPL=3, L=1   → selector 0x1B
+    dq 0x00AFFA000000FFFF
+
+    ; Sprint 16 — user data segment (64-bit): DPL=3        → selector 0x23
+    dq 0x00CFF2000000FFFF
+
 .pointer:
     dw ($ - gdt64 - 1)     ; limit
     dq gdt64               ; base
