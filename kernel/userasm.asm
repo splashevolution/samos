@@ -14,6 +14,7 @@
 
 global _user_enter
 global _user_exit
+global _user_halt
 global sam_kernel_rsp
 extern sam_kernel_rbp
 extern sam_kernel_ret
