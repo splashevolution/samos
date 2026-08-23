@@ -140,25 +140,27 @@ _start:
     ;   PDPT[0..3]→ pd_table0..3   (each covers 1 GiB)
     ;   Each PD[0..511] → 2 MiB huge pages
     ;   Required: VBoxVGA framebuffer lives at 0xE0000000 (GiB 3)
+    ; Sprint 16: PML4[0] and PDPT[0..1] carry U/S=1 (0x04) so ring 3 can
+    ; execute at 0x19000000. GiB 2-3 stay supervisor-only.
     mov  eax, pdpt_table
-    or   eax, 0x03
+    or   eax, 0x07          ; present + writable + USER
     mov  [pml4_table], eax
 
     ; Wire all 4 PDPT entries
     mov  eax, pd_table0
-    or   eax, 0x03
+    or   eax, 0x07          ; present + writable + USER
     mov  [pdpt_table + 0 * 8], eax
 
     mov  eax, pd_table1
-    or   eax, 0x03
+    or   eax, 0x07          ; present + writable + USER
     mov  [pdpt_table + 1 * 8], eax
 
     mov  eax, pd_table2
-    or   eax, 0x03
+    or   eax, 0x03          ; supervisor only
     mov  [pdpt_table + 2 * 8], eax
 
     mov  eax, pd_table3
-    or   eax, 0x03
+    or   eax, 0x03          ; supervisor only (framebuffer lives here)
     mov  [pdpt_table + 3 * 8], eax
 
     ; Fill pd_table0: physical 0x00000000 – 0x3FFFFFFF (GiB 0)
