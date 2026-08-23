@@ -67,11 +67,6 @@ typedef struct {
 /* ── The IDT (file-scope, referenced by idt_init) ─────────────────────── */
 static idt_gate_t idt_table[256];
 
-/* ── Helper: install one gate (DPL=0) ─────────────────────────────────── */
-static inline void idt_set_gate(int vec, void (*handler)(void)) {
-    idt_set_gate_dpl(vec, handler, 0);
-}
-
 /* ── Helper: install one gate with a given privilege level ────────────── */
 static inline void idt_set_gate_dpl(int vec, void (*handler)(void), uint8_t dpl) {
     uint64_t addr = (uint64_t)handler;
@@ -83,6 +78,11 @@ static inline void idt_set_gate_dpl(int vec, void (*handler)(void), uint8_t dpl)
     g->offset_mid = (uint16_t)((addr >> 16) & 0xFFFF);
     g->offset_hi  = (uint32_t)((addr >> 32) & 0xFFFFFFFF);
     g->zero       = 0;
+}
+
+/* ── Helper: install one gate (DPL=0) ─────────────────────────────────── */
+static inline void idt_set_gate(int vec, void (*handler)(void)) {
+    idt_set_gate_dpl(vec, handler, 0);
 }
 
 /* ── C exception handler (called from every stub) ─────────────────────── */
