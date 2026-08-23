@@ -105,14 +105,14 @@ static void serial_putchar(char c) {
 
 static void serial_puts(const char *s)   { while (*s) serial_putchar(*s++); }
 
-/* Sprint 16: syscall gate + ring-3 entry (needs serial_* above) */
-#include "syscall.h"
-
 static void serial_puthex(uint64_t v) {
     const char *h = "0123456789ABCDEF";
     serial_puts("0x");
     for (int i = 60; i >= 0; i -= 4) serial_putchar(h[(v>>i)&0xF]);
 }
+
+/* Sprint 16: syscall gate + ring-3 entry (needs serial_* above) */
+#include "syscall.h"
 
 static void serial_putdec(uint64_t v) {
     char buf[21]; int i = 20; buf[i] = '\0';
