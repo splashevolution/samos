@@ -994,7 +994,8 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
 
                     sam_user_enter(USER_CODE_BASE, USER_STACK_TOP);
 
-                    /* Control returns here after the task calls exit(2). */
+                    /* DEBUG: if this prints, resume worked */
+                    serial_puts("     [dbg] resumed into kernel_main\n");
                     sprint16_ok = 1;
                     vga_puts("     [PASS] ring-3 process ran + exited via syscall\n", VGA_GREEN);
                     serial_puts("     [PASS] Sprint 16: first SAM OS user process OK\n");
