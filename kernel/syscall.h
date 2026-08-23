@@ -55,9 +55,11 @@ uint64_t sam_kernel_rbp;
 uint64_t sam_kernel_ret;
 
 /* ── Enter ring 3 (never returns normally; exits via _user_exit) ─────── */
-/* MUST NOT be inlined: the asm relies on a real call frame (return
- * address on the stack) — see the movq 0x30(%rsp) stash below. */
+/* MUST NOT be inlined: _user_exit resumes into this function's caller. */
 static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user_rsp) {
+    /* Capture the true return address so _user_exit can jmp back without
+     * trusting the kernel stack (which is trampled while user code runs). */
+    sam_kernel_ret = (uint64_t)__builtin_return_address(0);
     __asm__ volatile (
         "pushfq\n\t"
         "movq %%rbp, %1\n\t"
@@ -67,10 +69,6 @@ static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user
         "push %%r14\n\t"
         "push %%r15\n\t"
         "movq %%rsp, %0\n\t"
-        /* Stash the return address in a global: the kernel stack below
-         * this point cannot be trusted across the ring-3 excursion. */
-        "movq 0x30(%%rsp), %%rax\n\t"
-        "movq %%rax, %2\n\t"
         /* Build the interrupt frame for iretq to ring 3 */
         "push %q4\n\t"          /* SS   = user data  */
         "push %3\n\t"           /* RSP  = user stack */
@@ -78,7 +76,7 @@ static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user
         "push %q5\n\t"          /* CS   = user code  */
         "push %6\n\t"           /* RIP  = entry      */
         "iretq\n\t"
-        : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp), "=m"(sam_kernel_ret)
+        : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp)
         : "r"(user_rsp), "r"((uint64_t)SEL_USER_DATA),
           "r"((uint64_t)SEL_USER_CODE), "r"(rip)
         : "rax", "rbx", "r12", "r13", "r14", "r15", "cc"
