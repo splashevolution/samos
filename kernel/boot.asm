@@ -23,6 +23,9 @@ STACK_SIZE  equ 0x4000          ; 16 KiB
 GDT_NULL    equ 0x00
 GDT_CODE64  equ 0x08
 GDT_DATA64  equ 0x10
+GDT_USERCODE equ 0x18
+GDT_USERDATA equ 0x20
+GDT_TSS     equ 0x28
 
 ; ── CR0 / CR4 / EFER flags ───────────────────────────────────
 CR0_PE      equ (1 << 0)        ; Protection Enable
@@ -78,6 +81,20 @@ pd_table3:  resb PAGE_SIZE   ; covers 0xC0000000 – 0xFFFFFFFF  (GiB 3, has 0xE
 stack_bottom:
     resb STACK_SIZE
 stack_top:
+
+; Sprint 16: 64-bit Task State Segment.
+; On any ring3 -> ring0 transition (int 0x80, exceptions) the CPU loads
+; RSP0 from here. Without a loaded TSS such a transition triple-faults.
+alignb 16
+tss:
+    resd 1                  ; 0-3   reserved
+    resd 1                  ; 4-7   RSP0  (filled at boot: stack_top)
+    resd 1                  ; 8-11  RSP1
+    resd 1                  ; 12-15 RSP2
+    resd 2                  ; 16-23 reserved
+    resd 64                 ; 24-279 IST0..IST7 + reserved/apic
+    resd 10                 ; 280-319 reserved (IO map base = 104 -> no map)
+tss_end:
 
 ; ============================================================
 ; Section: .text  (32-bit entry — GRUB drops us here)
@@ -241,6 +258,13 @@ bits 64
     ; Reload stack pointer (still valid — just re-confirm)
     mov  rsp, stack_top
 
+    ; Sprint 16: fill TSS.RSP0 with the kernel stack and load the TSS.
+    ; Required before any ring3 -> ring0 transition (int 0x80).
+    mov  eax, stack_top
+    mov  [rel tss + 4], eax         ; RSP0 low dword
+    mov  ax, GDT_TSS
+    ltr  ax
+
     ; ── Initialise x87 FPU and SSE/SSE4.2 state ─────────────
     ; CR4.OSFXSR (bit 9)  must be set for FXSAVE/FXRSTOR and LDMXCSR
     ; CR4.OSXMMEXCPT (bit 10) enables #XM exception for SSE (optional but clean)
@@ -293,6 +317,16 @@ gdt64:
 
     ; Sprint 16 — user data segment (64-bit): DPL=3        → selector 0x23
     dq 0x00CFF2000000FFFF
+
+    ; Sprint 16 — 64-bit TSS descriptor (16 bytes)         → selector 0x28
+    dw tss_end - tss - 1            ; limit low (TSS is 104 bytes)
+    dw tss & 0xFFFF                 ; base 15:0
+    db (tss >> 16) & 0xFF           ; base 23:16
+    db 0x89                         ; present, type = available 64-bit TSS
+    db 0x00                         ; flags + limit 19:16 (byte granular, no G)
+    db (tss >> 24) & 0xFF           ; base 31:24
+    dd (tss >> 32) & 0xFFFFFFFF     ; base 63:32
+    dd 0                            ; reserved
 
 .pointer:
     dw ($ - gdt64 - 1)     ; limit
