@@ -982,6 +982,16 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
                     serial_putdec((uint64_t)got); serial_puts(" bytes)\n");
                     serial_puts("     Entering ring 3...\n");
 
+                    /* DEBUG Sprint 16: dump saved-kernel-frame area */
+                    {
+                        extern uint64_t sam_kernel_rsp;
+                        volatile uint64_t *sp;
+                        sam_kernel_rsp = 0xDEADBEEFCAFEBABEULL; /* marker */
+                        serial_puts("     [dbg] &sam_kernel_rsp="); serial_puthex((uint64_t)&sam_kernel_rsp); serial_puts("\n");
+                        __asm__ volatile ("movq %%rsp, %0" : "=r"(sp));
+                        serial_puts("     [dbg] kernel rsp pre-enter="); serial_puthex((uint64_t)sp); serial_puts("\n");
+                    }
+
                     sam_user_enter(USER_CODE_BASE, USER_STACK_TOP);
 
                     /* Control returns here after the task calls exit(2). */

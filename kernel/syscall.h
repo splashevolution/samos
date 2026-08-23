@@ -116,6 +116,16 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
          * stack saved at enter time and returns into sam_user_enter's
          * caller, abandoning this interrupt frame entirely. */
         serial_puts("[OK] Sprint 16: ring-3 task exited cleanly\n");
+        {
+            extern uint64_t sam_kernel_rsp;
+            uint64_t dbg_rsp, dbg_val;
+            __asm__ volatile ("movq %%rsp, %0" : "=r"(dbg_rsp));
+            dbg_val = sam_kernel_rsp;
+            serial_puts("     [dbg] isr rsp="); serial_puthex(dbg_rsp);
+            serial_puts("  saved="); serial_puthex(dbg_val);
+            if (dbg_val == 0xDEADBEEFCAFEBABEULL) serial_puts("  <== CORRUPTED!");
+            serial_puts("\n");
+        }
         _user_exit();
         /* not reached */
         for (;;) __asm__ volatile ("hlt");
