@@ -258,10 +258,20 @@ bits 64
     ; Reload stack pointer (still valid — just re-confirm)
     mov  rsp, stack_top
 
-    ; Sprint 16: fill TSS.RSP0 with the kernel stack and load the TSS.
-    ; Required before any ring3 -> ring0 transition (int 0x80).
+    ; Sprint 16: patch TSS base into its GDT descriptor, fill RSP0 with
+    ; the kernel stack, then load the TSS. Required before any ring3 ->
+    ; ring0 transition (int 0x80).
+    mov  rax, tss
+    mov  [rel gdt_tss + 2], ax          ; base 15:0
+    shr  rax, 16
+    mov  [rel gdt_tss + 4], al          ; base 23:16
+    shr  rax, 8
+    mov  [rel gdt_tss + 7], al          ; base 31:24
+    ; (base 63:32 stays 0 — kernel lives below 4 GiB)
+
     mov  eax, stack_top
-    mov  [rel tss + 4], eax         ; RSP0 low dword
+    mov  [rel tss + 4], eax             ; TSS.RSP0 = kernel stack top
+
     mov  ax, GDT_TSS
     ltr  ax
 
@@ -319,13 +329,15 @@ gdt64:
     dq 0x00CFF2000000FFFF
 
     ; Sprint 16 — 64-bit TSS descriptor (16 bytes)         → selector 0x28
+    ; Base address is patched at boot (labels aren't resolvable here).
+gdt_tss:
     dw tss_end - tss - 1            ; limit low (TSS is 104 bytes)
-    dw tss & 0xFFFF                 ; base 15:0
-    db (tss >> 16) & 0xFF           ; base 23:16
+    dw 0                            ; base 15:0   (patched)
+    db 0                            ; base 23:16  (patched)
     db 0x89                         ; present, type = available 64-bit TSS
-    db 0x00                         ; flags + limit 19:16 (byte granular, no G)
-    db (tss >> 24) & 0xFF           ; base 31:24
-    dd (tss >> 32) & 0xFFFFFFFF     ; base 63:32
+    db 0x00                         ; flags + limit 19:16
+    db 0                            ; base 31:24  (patched)
+    dd 0                            ; base 63:32  (patched)
     dd 0                            ; reserved
 
 .pointer:
