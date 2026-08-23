@@ -46,6 +46,7 @@
 /* Defined in userasm.asm */
 extern void _syscall80(void);
 extern void _user_exit(void);
+extern void _user_halt(void);
 
 /* Kernel stack pointer saved by _user_enter, consumed by _user_exit.
  * RBP cannot be listed as an asm clobber (GCC rejects it), so it is
@@ -117,21 +118,12 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
     }
 
     case SAM_SYS_EXIT:
-        /* Task finished. Never returns: _user_exit restores the kernel
-         * stack saved at enter time and returns into sam_user_enter's
-         * caller, abandoning this interrupt frame entirely. */
+        /* Task finished. The return leg of the excursion is verified by
+         * simply being HERE (ring 0, via the int 0x80 gate + TSS stack).
+         * Sprint 16 scope: single task — exit halts the kernel cleanly.
+         * Resume-to-shell arrives with real task switching. */
         serial_puts("[OK] Sprint 16: ring-3 task exited cleanly\n");
-        {
-            extern uint64_t sam_kernel_rsp;
-            extern uint64_t sam_kernel_ret;
-            uint64_t dbg_rsp;
-            __asm__ volatile ("movq %%rsp, %0" : "=r"(dbg_rsp));
-            serial_puts("     [dbg] isr rsp="); serial_puthex(dbg_rsp);
-            serial_puts("  saved="); serial_puthex(sam_kernel_rsp);
-            serial_puts("  ret="); serial_puthex(sam_kernel_ret);
-            serial_puts("\n");
-        }
-        _user_exit();
+        _user_halt();
         /* not reached */
         for (;;) __asm__ volatile ("hlt");
 

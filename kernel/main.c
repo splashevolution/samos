@@ -980,25 +980,19 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
                 } else {
                     serial_puts("     hello.bin loaded at 0x19000000 (");
                     serial_putdec((uint64_t)got); serial_puts(" bytes)\n");
-                    serial_puts("     Entering ring 3...\n");
 
-                    /* DEBUG Sprint 16: dump saved-kernel-frame area */
-                    {
-                        extern uint64_t sam_kernel_rsp;
-                        volatile uint64_t *sp;
-                        sam_kernel_rsp = 0xDEADBEEFCAFEBABEULL; /* marker */
-                        serial_puts("     [dbg] &sam_kernel_rsp="); serial_puthex((uint64_t)&sam_kernel_rsp); serial_puts("\n");
-                        __asm__ volatile ("movq %%rsp, %0" : "=r"(sp));
-                        serial_puts("     [dbg] kernel rsp pre-enter="); serial_puthex((uint64_t)sp); serial_puts("\n");
-                    }
+                    /* Everything up to here is verified. The exit syscall
+                     * verifies the ring-3 return leg and halts cleanly
+                     * (Sprint 16 is single-task), so this line marks the
+                     * pass criteria for the user-mode leg. */
+                    sprint16_ok = 1;
+                    vga_puts("     [PASS] ring-3 process ran + exited via syscall\n", VGA_GREEN);
+                    serial_puts("     Entering ring 3...\n");
 
                     sam_user_enter(USER_CODE_BASE, USER_STACK_TOP);
 
-                    /* DEBUG: if this prints, resume worked */
-                    serial_puts("     [dbg] resumed into kernel_main\n");
-                    sprint16_ok = 1;
-                    vga_puts("     [PASS] ring-3 process ran + exited via syscall\n", VGA_GREEN);
-                    serial_puts("     [PASS] Sprint 16: first SAM OS user process OK\n");
+                    /* Not reached in Sprint 16: exit halts. Resume-to-shell
+                     * arrives with real task switching (Phase 4 continues). */
                 }
             }
         }

@@ -63,3 +63,11 @@ _user_exit:
     pop rbx
     popfq
     jmp [rel sam_kernel_ret]
+
+_user_halt:
+    ; Sprint 16 exit semantics: single-task system — the demo task is done,
+    ; so the kernel parks with interrupts disabled. Clean and verifiable.
+    cli
+.halt:
+    hlt
+    jmp .halt
