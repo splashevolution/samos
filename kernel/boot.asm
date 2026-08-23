@@ -162,11 +162,14 @@ _start:
     mov  [pdpt_table + 3 * 8], eax
 
     ; Fill pd_table0: physical 0x00000000 – 0x3FFFFFFF (GiB 0)
+    ; Sprint 16: U/S=1 (0x04) — ring 3 runs at 0x19000000 in this range.
+    ; HONEST LIMIT: user can read/write all of GiB 0-1 until per-task
+    ; page tables arrive (Phase 4 continues).
     mov  ebx, 0x00000000
     mov  ecx, 0
 .map_pd0:
     mov  eax, ebx
-    or   eax, 0x83          ; present + writable + huge
+    or   eax, 0x87          ; present + writable + USER + huge
     mov  [pd_table0 + ecx * 8], eax
     add  ebx, 0x200000
     inc  ecx
@@ -179,7 +182,7 @@ _start:
     mov  ecx, 0
 .map_pd1:
     mov  eax, ebx
-    or   eax, 0x83          ; present + writable + huge
+    or   eax, 0x87          ; present + writable + USER + huge
     mov  [pd_table1 + ecx * 8], eax
     add  ebx, 0x200000
     inc  ecx
