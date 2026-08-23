@@ -70,11 +70,11 @@ static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user
         "push %%r15\n\t"
         "movq %%rsp, %0\n\t"
         /* Build the interrupt frame for iretq to ring 3 */
-        "push %q4\n\t"          /* SS   = user data  */
-        "push %3\n\t"           /* RSP  = user stack */
+        "push %q3\n\t"          /* SS   = user data  */
+        "push %2\n\t"           /* RSP  = user stack */
         "push $0x202\n\t"       /* RFLAGS: IF=1, reserved bit 1 */
-        "push %q5\n\t"          /* CS   = user code  */
-        "push %6\n\t"           /* RIP  = entry      */
+        "push %q4\n\t"          /* CS   = user code  */
+        "push %5\n\t"           /* RIP  = entry      */
         "iretq\n\t"
         : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp)
         : "r"(user_rsp), "r"((uint64_t)SEL_USER_DATA),
