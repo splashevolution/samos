@@ -16,6 +16,7 @@ global _user_enter
 global _user_exit
 global sam_kernel_rsp
 extern sam_kernel_rbp
+extern sam_kernel_ret
 
 section .data
 sam_kernel_rsp: dq 0
@@ -50,7 +51,9 @@ _user_enter:
     iretq
 
 _user_exit:
-    ; Resume exactly where the kernel thread left off.
+    ; Resume exactly where the kernel thread left off. The return address
+    ; was stashed in sam_kernel_ret at enter time — the kernel stack below
+    ; the saved frame is NOT trusted (it gets trampled while user runs).
     mov rsp, [rel sam_kernel_rsp]
     mov rbp, [rel sam_kernel_rbp]
     pop r15
@@ -59,5 +62,4 @@ _user_exit:
     pop r12
     pop rbx
     popfq
-    xor eax, eax
-    ret
+    jmp [rel sam_kernel_ret]

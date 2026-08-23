@@ -52,6 +52,7 @@ extern void _user_exit(void);
  * stashed in this global instead of on the stack. */
 extern uint64_t sam_kernel_rsp;
 uint64_t sam_kernel_rbp;
+uint64_t sam_kernel_ret;
 
 /* ── Enter ring 3 (never returns normally; exits via _user_exit) ─────── */
 static void sam_user_enter(uint64_t rip, uint64_t user_rsp) {
@@ -64,17 +65,21 @@ static void sam_user_enter(uint64_t rip, uint64_t user_rsp) {
         "push %%r14\n\t"
         "push %%r15\n\t"
         "movq %%rsp, %0\n\t"
+        /* Stash the return address in a global: the kernel stack below
+         * this point cannot be trusted across the ring-3 excursion. */
+        "movq 0x30(%%rsp), %%rax\n\t"
+        "movq %%rax, %2\n\t"
         /* Build the interrupt frame for iretq to ring 3 */
-        "push %q3\n\t"          /* SS   = user data  */
-        "push %2\n\t"           /* RSP  = user stack */
+        "push %q4\n\t"          /* SS   = user data  */
+        "push %3\n\t"           /* RSP  = user stack */
         "push $0x202\n\t"       /* RFLAGS: IF=1, reserved bit 1 */
-        "push %q4\n\t"          /* CS   = user code  */
-        "push %5\n\t"           /* RIP  = entry      */
+        "push %q5\n\t"          /* CS   = user code  */
+        "push %6\n\t"           /* RIP  = entry      */
         "iretq\n\t"
-        : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp)
+        : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp), "=m"(sam_kernel_ret)
         : "r"(user_rsp), "r"((uint64_t)SEL_USER_DATA),
           "r"((uint64_t)SEL_USER_CODE), "r"(rip)
-        : "rbx", "r12", "r13", "r14", "r15", "cc"
+        : "rax", "rbx", "r12", "r13", "r14", "r15", "cc"
     );
     /* Not reached when the task exits cleanly. If it somehow falls through,
      * halt here rather than corrupt kernel state. */
