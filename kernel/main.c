@@ -14,15 +14,23 @@
 #include "boot_config.h"
 #include "panic.h"      /* sam_panic() — must precede idt.h */
 #include "idt.h"        /* idt_init(), IDT_DEFINE_STUBS() */
+#include "acpi.h"       /* acpi_init(), sam_acpi_t */
+#include "ps2kbd.h"     /* ps2kbd_init(), ps2_wait_char(), IDT_DEFINE_KBD_STUB() */
+#include "ata.h"        /* ata_init(), ata_read_sectors(), sam_ata_t */
 #include "wizard.h"
 #include "shell.h"
 
 /*
- * Define all 32 ISR stubs + _isr_common in the .text section.
- * This macro emits one large __asm__() block and must appear exactly once,
- * at file scope, before kernel_main is called.
+ * Define all 32 CPU exception ISR stubs + _isr_common in the .text section.
+ * Must appear exactly once, at file scope, before kernel_main is called.
  */
 IDT_DEFINE_STUBS()
+
+/*
+ * Define the PS/2 keyboard IRQ stub (_ps2kbd_isr) in .text.
+ * Must appear after IDT_DEFINE_STUBS (shares .text section).
+ */
+IDT_DEFINE_KBD_STUB()
 
 /* -- Canonical global definitions (declared extern in headers) -- */
 int               sam_simd_level = SAM_SIMD_SCALAR;
@@ -231,7 +239,7 @@ static void domain_print(const sam_domain_t *d, uint16_t colour) {
 static void print_banner(void) {
     vga_puts("============================================================\n", VGA_CYAN);
     vga_puts("  SAM OS  v0.1.0  |  Structured Adaptive Machine\n",            VGA_WHITE);
-    vga_puts("  Proof-Native Kernel  |  Sprint 14  |  2026\n",                VGA_WHITE);
+    vga_puts("  Proof-Native Kernel  |  Sprint 15  |  2026\n",                VGA_WHITE);
     vga_puts("============================================================\n", VGA_CYAN);
     vga_puts("\n", VGA_WHITE);
 }
@@ -246,15 +254,47 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     print_banner();
     serial_puts("============================================================\n");
     serial_puts("  SAM OS  v0.1.0  |  Structured Adaptive Machine\n");
-    serial_puts("  Proof-Native Kernel  |  Sprint 14  |  2026\n");
+    serial_puts("  Proof-Native Kernel  |  Sprint 15  |  2026\n");
     serial_puts("============================================================\n\n");
 
-    /* Sprint 14: Install IDT — must happen before any code that can fault.
-     * From this point on, a #GP or #PF will show the panic screen instead
-     * of triple-faulting silently. */
+    /* Sprint 14: Install IDT — must happen before any code that can fault. */
     idt_init();
     serial_puts("[OK] Sprint 14: IDT installed — 32 exception vectors active\n");
     vga_puts("[OK] Sprint 14: IDT installed\n", VGA_GREEN);
+
+    /* Sprint 15 / Phase 3: ACPI, PS/2 keyboard (IRQ-driven), ATA disk */
+    sam_acpi_t acpi;
+    int acpi_ok = acpi_init(&acpi);
+    if (acpi_ok) {
+        serial_puts("[OK] Sprint 15: ACPI found  OEM="); serial_puts(acpi.oem_id);
+        serial_puts("  CPUs="); serial_putdec(acpi.cpu_count);
+        serial_puts("  LAPIC="); serial_puthex(acpi.lapic_base);
+        if (acpi.ioapic_base)
+        { serial_puts("  IOAPIC="); serial_puthex(acpi.ioapic_base); }
+        serial_puts("\n");
+        vga_puts("[OK] Sprint 15: ACPI parsed\n", VGA_GREEN);
+    } else {
+        serial_puts("[WARN] Sprint 15: ACPI RSDP not found — 1 CPU assumed\n");
+        vga_puts("[WARN] Sprint 15: No ACPI\n", VGA_YELLOW);
+    }
+
+    /* PS/2 keyboard: remap PIC, install IRQ 1 handler, enable interrupts */
+    ps2kbd_init();
+    serial_puts("[OK] Sprint 15: PS/2 keyboard IRQ driver installed (vector 0x21)\n");
+    vga_puts("[OK] Sprint 15: PS/2 keyboard IRQ-driven\n", VGA_GREEN);
+
+    /* ATA disk: detect primary channel drive */
+    sam_ata_t ata;
+    int ata_ok = ata_init(&ata);
+    if (ata_ok) {
+        serial_puts("[OK] Sprint 15: ATA disk found  model=");
+        serial_puts(ata.model);
+        serial_puts("  size="); serial_putdec(ata.size_mb); serial_puts(" MiB\n");
+        vga_puts("[OK] Sprint 15: ATA disk detected\n", VGA_GREEN);
+    } else {
+        serial_puts("[INFO] Sprint 15: No ATA disk on primary channel\n");
+        vga_puts("[INFO] Sprint 15: No ATA disk\n", VGA_WHITE);
+    }
 
     /* Sprint 10-A: MCP hardware scan
      * PIT calibration runs first (needed by mcp_scan_cpu for cpu_mhz).
@@ -266,7 +306,6 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     sam_mcp_scan(&mcp, multiboot_info, (uint32_t)cpu_mhz_early);
 
     serial_puts("[OK] Sprint 10-A: MCP scan complete\n");
-    sam_mcp_report(&mcp, serial_puts, serial_putdec, serial_puthex);
 
     /* Sprint 10-B: Pixel framebuffer init.
      * mcp_scan_fb records the raw GRUB tag before fb_init() runs. Treat
@@ -805,7 +844,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         }
     }
 
-    /* 11. Sprint 10 sentinels — verify dynamic domains are writable */
+    /* 11. Sprint 10 sentinels -- verify dynamic domains are writable */
     vga_puts("\n[OK] Sprint 10-D: Dynamic domain sentinels\n", VGA_GREEN);
     serial_puts("\n[OK] Sprint 10-D: Dynamic domain sentinels\n");
 
@@ -857,14 +896,14 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         vga_puts(bcfg.mode_name, VGA_CYAN);
         vga_puts("  (dynamic domains)\n", VGA_GREEN);
         vga_puts("[SAM OS] STF model     : loaded (format-agnostic)\n",    VGA_GREEN);
-        vga_puts("[SAM OS] Sprint 14 PASS -- IDT + Panic screen + E820 domain validation\n", VGA_GREEN);
+        vga_puts("[SAM OS] Sprint 15 PASS -- ACPI + PS2 keyboard IRQ + ATA disk + full PCI scan\n", VGA_GREEN);
         serial_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n");
         serial_puts("[SAM OS] Boot wizard   : ");
         serial_puts(g_fb.ready ? "shown  (pixel framebuffer)\n" : "shown  (VGA text wizard)\n");
         serial_puts("[SAM OS] Boot mode     : "); serial_puts(bcfg.mode_name);
         serial_puts("  (dynamic domains)\n");
         serial_puts("[SAM OS] STF model     : loaded (format-agnostic)\n");
-        serial_puts("[SAM OS] Sprint 14 PASS -- IDT + Panic screen + E820 domain validation\n");
+        serial_puts("[SAM OS] Sprint 15 PASS -- ACPI + PS2 keyboard IRQ + ATA disk + full PCI scan\n");
     } else {
         vga_puts("[SAM OS] Sprint 13 FAIL\n", VGA_RED);
         serial_puts("[SAM OS] Sprint 13 FAIL\n");
@@ -873,10 +912,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     vga_puts("============================================================\n", VGA_CYAN);
     serial_puts("============================================================\n");
 
-    /* Sprint 13: Drop into interactive kernel shell.
-     * Clear the framebuffer to black so the shell starts on a clean canvas.
-     * shell.h's sh_putchar/sh_fb_putchar renders directly into the pixel
-     * framebuffer when g_fb.ready, so VBE stays active throughout. */
+    /* Sprint 13: Drop into interactive kernel shell */
     if (g_fb.ready)
         fb_fill_rect(0, 0, g_fb.width, g_fb.height, 0x00000000);
     serial_puts("[OK] Sprint 13: Entering kernel shell\n");

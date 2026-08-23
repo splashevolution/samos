@@ -462,6 +462,25 @@ full panic screen (VGA text + pixel framebuffer overlay + serial) and halts clea
 ============================================================
 ```
 
+### Sprint 15 — Phase 3: Real Hardware Abstraction  ✅
+**Date**: 2026-06-23
+**Goal**: The kernel knows what hardware it is actually running on.
+
+**Files added**:
+| File | Purpose |
+|------|---------|
+| `kernel/acpi.h` | RSDP search (EBDA + BIOS ROM), RSDT/XSDT walk, MADT parse → CPU count + I/O APIC base |
+| `kernel/ps2kbd.h` | 8259A PIC remap, IRQ 1 handler at vector 0x21, 64-byte ring buffer, US keymap, `ps2_wait_char()` |
+| `kernel/ata.h` | ATA PIO: IDENTIFY DEVICE, LBA28 sector read, primary channel detect |
+
+**What Sprint 15 adds**:
+- **ACPI**: RSDP located in EBDA and BIOS ROM area. RSDT (ACPI 1.0) and XSDT (ACPI 2.0+) both supported. MADT parsed for enabled CPU count and I/O APIC base address. Graceful degradation: 1 CPU assumed if absent.
+- **Full recursive PCI scan**: replaced the old bus-0-function-0 loop with a proper depth-first recursive scan. Checks `header type` bit 7 (multifunction) → enumerates all 8 functions. Follows PCI-PCI bridge secondary bus numbers recursively. 256-bit visited bitmap prevents loops. AHCI BAR5 (ABAR) and ATA I/O base recorded for disk drivers.
+- **PS/2 keyboard IRQ driver**: 8259A master PIC remapped (IRQs 0-7 → vectors 0x20-0x27, slave → 0x28-0x2F). IRQ 1 handler installed at vector 0x21. Scancode → ASCII US keymap with shift tracking. Ring buffer. `ps2_wait_char()` blocks via `HLT` instead of a tight spin.
+- **ATA PIO disk**: software reset, IDENTIFY DEVICE, model string and LBA28 sector count extracted. `ata_read_sectors(lba, count, buf)` for read-only access. No DMA, no LBA48 yet.
+- **Before Sprint 15**: PS/2 keyboard polled in a tight loop (VirtualBox starvation risk). PCI scan missed multifunction devices and secondary buses. No disk access. No CPU topology.
+- **After Sprint 15**: interrupt-driven keyboard, full PCI device inventory, ATA disk detected and readable, CPU count from ACPI.
+
 ---
 
 ## Roadmap
@@ -472,7 +491,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 |-------|------|--------|
 | 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
 | 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
-| 3 — Hardware | ACPI, full PCI scan, ATA/AHCI disk, USB HID | Planned |
+| 3 — Hardware | ACPI, PS/2 IRQ keyboard, ATA PIO disk | ✅ Done (Sprint 15); full PCI scan + USB HID remain |
 | 4 — App model | VFS, initrd, syscall ABI, ring-3 process | Planned |
 | 5 — Inference | Real model end-to-end on bare metal | Future |
 | 6 — Compatibility | SAM ABI → Lua → WASM → Linux compat | Far future |

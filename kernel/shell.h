@@ -346,7 +346,7 @@ static void cmd_setup(sam_shell_t *sh, const sam_mcp_t *mcp) {
     /* Wizard clears and redraws the screen; re-print shell header on return */
     sh_clear(sh);
     sh_puts(sh, "============================================================\n", SH_CYAN);
-    sh_puts(sh, "  SAM OS  v0.1.0  |  Kernel Shell  |  Sprint 13\n", SH_WHITE);
+    sh_puts(sh, "  SAM OS  v0.1.0  |  Kernel Shell  |  Sprint 15\n", SH_WHITE);
     sh_puts(sh, "============================================================\n", SH_CYAN);
     sh_puts(sh, "  Wizard complete. Type 'help' for commands.\n", SH_GREY);
 }
@@ -400,7 +400,7 @@ sam_shell_run(const sam_mcp_t *mcp, const sam_boot_config_t *bcfg)
 
     sh_clear(&sh);
     sh_puts(&sh, "============================================================\n", SH_CYAN);
-    sh_puts(&sh, "  SAM OS  v0.1.0  |  Kernel Shell  |  Sprint 13\n", SH_WHITE);
+    sh_puts(&sh, "  SAM OS  v0.1.0  |  Kernel Shell  |  Sprint 15\n", SH_WHITE);
     sh_puts(&sh, "============================================================\n", SH_CYAN);
     sh_puts(&sh, "  Type 'help' for available commands.\n", SH_GREY);
     sh_prompt(&sh);

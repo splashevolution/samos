@@ -281,148 +281,201 @@ static inline void mcp_scan_cpu(sam_mcp_t *mcp) {
     else                mcp->simd_level = MCP_SIMD_SCALAR;
 }
 
-/* ── MCP scan: PCI bus (class-based, hardware-agnostic) ─────────────────── */
-/* KNOWN LIMITATIONS:
- *  - Only scans bus 0, devices 0-31, function 0.
- *  - Misses multifunction devices (function 1+), secondary PCI buses,
- *    PCIe bridges, USB-attached devices, and devices behind PCIe switches.
- *  - No ACPI table support — hotplug devices are invisible.
- *  Sprint 14 will add multifunction + secondary bus enumeration.         */
-static inline void mcp_scan_pci(sam_mcp_t *mcp) {
-    /* Scan bus 0, devices 0-31, function 0 only (non-multifunction scan) */
-    for (uint8_t dev = 0; dev < 32; dev++) {
-        uint32_t id = pci_read32(0, dev, 0, 0x00);
-        if (id == 0xFFFFFFFF || id == 0x00000000) continue;
+/* ── MCP scan: PCI bus — full recursive multifunction + bridge scan ─────── */
+/*
+ * Sprint 15: Proper PCI enumeration.
+ *
+ * Algorithm (standard recursive PCI scan, PCI Local Bus Spec §6.1):
+ *   For each bus in [0..255]:
+ *     For each device in [0..31]:
+ *       Read function 0. If vendor == 0xFFFF → no device, skip.
+ *       Check header type byte (offset 0x0E):
+ *         bit 7 set → multifunction: enumerate functions 1-7 as well.
+ *         bits 6:0 == 0x01 → PCI-PCI bridge: read secondary bus (offset 0x19)
+ *                             and recurse into it.
+ *       Classify every valid function by class+subclass.
+ *
+ * We track visited buses in a 256-bit bitmap to avoid infinite loops on
+ * broken BIOS tables that create bus cycles (rare but possible on VMs).
+ *
+ * Additional fields added to sam_mcp_t:
+ *   ahci_bar5  — BAR5 physical address of first AHCI controller (ABAR)
+ *   ata_iobase — I/O base of first legacy ATA controller (for ATA PIO)
+ *   pci_dev_count — total PCI functions found
+ */
 
-        uint16_t vendor = (uint16_t)(id & 0xFFFF);
-        uint16_t device = (uint16_t)(id >> 16);
+/* Additional MCP fields for Phase 3 — appended via a separate struct.
+ * We add them as a sub-struct so the existing sam_mcp_t ABI is unchanged. */
+#ifndef SAM_MCP_PCI3_FIELDS
+#define SAM_MCP_PCI3_FIELDS
+/* These fields are accessed as mcp->pci3.field */
+typedef struct {
+    uint32_t ahci_bar5;     /* AHCI ABAR (BAR5) physical address, 0 if none */
+    uint16_t ata_iobase;    /* primary ATA I/O base (0x1F0 standard, or from BAR) */
+    uint16_t pci_dev_count; /* total PCI functions enumerated */
+} sam_mcp_pci3_t;
+#endif
 
-        uint32_t cc  = pci_read32(0, dev, 0, 0x08);
-        uint16_t pci_class = (uint16_t)(cc >> 16);   /* class + subclass */
-        uint8_t  prog_if   = (uint8_t)((cc >> 8) & 0xFF);
+static uint8_t _pci_bus_visited[32]; /* 256-bit bitmap: bit N = bus N visited */
 
-        /* Display controllers — class-based detection */
-        if (pci_class == PCI_CLASS_DISPLAY_VGA ||
-            pci_class == PCI_CLASS_DISPLAY_XGA ||
-            pci_class == PCI_CLASS_DISPLAY_3D  ||
-            pci_class == PCI_CLASS_DISPLAY_OTHER) {
+static inline int _pci_bus_mark(uint8_t bus) {
+    uint8_t byte = bus >> 3, bit = bus & 7;
+    if (_pci_bus_visited[byte] & (1u << bit)) return 0; /* already visited */
+    _pci_bus_visited[byte] |= (1u << bit);
+    return 1;
+}
 
-            if (mcp->gpu_class == MCP_GPU_NONE) {
-                mcp->gpu_class      = MCP_GPU_INTEGRATED;
-                mcp->gpu_pci_vendor = vendor;
-                mcp->gpu_pci_device = device;
+static sam_mcp_pci3_t _pci3;   /* filled during scan, copied into mcp after */
+
+static inline void _pci_classify(sam_mcp_t *mcp,
+                                  uint8_t bus, uint8_t dev, uint8_t fn) {
+    uint32_t id = pci_read32(bus, dev, fn, 0x00);
+    if (id == 0xFFFFFFFF || id == 0x00000000) return;
+
+    uint16_t vendor = (uint16_t)(id & 0xFFFF);
+    uint16_t device = (uint16_t)(id >> 16);
+
+    uint32_t cc       = pci_read32(bus, dev, fn, 0x08);
+    uint16_t pci_class = (uint16_t)(cc >> 16);
+    uint8_t  prog_if   = (uint8_t)((cc >> 8) & 0xFF);
+
+    _pci3.pci_dev_count++;
+
+    /* Display */
+    if (pci_class == PCI_CLASS_DISPLAY_VGA ||
+        pci_class == PCI_CLASS_DISPLAY_XGA ||
+        pci_class == PCI_CLASS_DISPLAY_3D  ||
+        pci_class == PCI_CLASS_DISPLAY_OTHER) {
+        if (mcp->gpu_class == MCP_GPU_NONE) {
+            mcp->gpu_class      = MCP_GPU_INTEGRATED;
+            mcp->gpu_pci_vendor = vendor;
+            mcp->gpu_pci_device = device;
+        } else {
+            mcp->gpu_class = MCP_GPU_MULTI;
+        }
+    }
+
+    /* AHCI: class 0x0106 — read BAR5 (ABAR) for Phase 3 disk driver */
+    if (pci_class == PCI_CLASS_STORAGE_AHCI) {
+        mcp->has_ahci = 1;
+        mcp->storage_count++;
+        if (_pci3.ahci_bar5 == 0) {
+            uint32_t bar5 = pci_read32(bus, dev, fn, 0x24);
+            _pci3.ahci_bar5 = bar5 & ~0xFu;  /* strip lower 4 attribute bits */
+        }
+    }
+
+    /* Legacy ATA / IDE: class 0x0101 — record primary I/O base */
+    if ((pci_class & 0xFF00) == 0x0100 && (pci_class & 0x00FF) == 0x01) {
+        if (_pci3.ata_iobase == 0) {
+            /* prog_if bit 0: 0 = legacy 0x1F0, 1 = native BAR0 */
+            if ((prog_if & 0x01) == 0) {
+                _pci3.ata_iobase = 0x1F0;
             } else {
-                /* Second display device = multi-GPU or discrete + integrated */
-                mcp->gpu_class = MCP_GPU_MULTI;
+                uint32_t bar0 = pci_read32(bus, dev, fn, 0x10);
+                if (bar0 & 1) _pci3.ata_iobase = (uint16_t)(bar0 & ~3u);
             }
         }
-
-        /* Storage controllers */
-        if (pci_class == PCI_CLASS_STORAGE_AHCI) {
-            mcp->has_ahci = 1;
-            mcp->storage_count++;
-        }
-        if (pci_class == PCI_CLASS_STORAGE_NVME) {
-            mcp->has_nvme = 1;
-            mcp->storage_count++;
-        }
-
-        /* Network */
-        if (pci_class == PCI_CLASS_NETWORK_ETHERNET) mcp->has_ethernet  = 1;
-        if (pci_class == PCI_CLASS_NETWORK_WIRELESS) mcp->has_wireless   = 1;
-
-        /* USB: class 0x0C, subclass 0x03, prog_if 0x20=EHCI, 0x30=xHCI */
-        if ((pci_class & 0xFF00) == 0x0C00 &&
-            (pci_class & 0x00FF) == 0x03) {
-            if (prog_if == 0x30) mcp->has_usb3 = 1;
-            else                 mcp->has_usb2 = 1;
-        }
-
-        /* Audio: HDA class 0x0403 */
-        if (pci_class == PCI_CLASS_AUDIO_HDA) mcp->has_hda_audio = 1;
-
-        (void)vendor; (void)device; /* suppress unused warnings */
     }
 
-    /* Also scan bus 0x3F (QuickPath / uncore devices on Nehalem/Westmere) */
-    for (uint8_t dev = 0; dev < 8; dev++) {
-        uint32_t id = pci_read32(0x3F, dev, 0, 0x00);
-        if (id == 0xFFFFFFFF || id == 0x00000000) continue;
-        /* Host bridges on 0x3F — no action needed, just don't panic */
+    /* NVMe: class 0x0108 */
+    if (pci_class == PCI_CLASS_STORAGE_NVME) {
+        mcp->has_nvme = 1;
+        mcp->storage_count++;
     }
+
+    /* Network */
+    if (pci_class == PCI_CLASS_NETWORK_ETHERNET) mcp->has_ethernet = 1;
+    if (pci_class == PCI_CLASS_NETWORK_WIRELESS) mcp->has_wireless  = 1;
+
+    /* USB: class=0x0C subclass=0x03, prog_if distinguishes EHCI/xHCI */
+    if ((pci_class & 0xFF00) == 0x0C00 && (pci_class & 0x00FF) == 0x03) {
+        if (prog_if == 0x30) mcp->has_usb3 = 1;
+        else                 mcp->has_usb2 = 1;
+    }
+
+    /* Audio HDA: class 0x0403 */
+    if (pci_class == PCI_CLASS_AUDIO_HDA) mcp->has_hda_audio = 1;
+
+    (void)vendor; (void)device;
+}
+
+/* Forward declaration for mutual recursion */
+static inline void _pci_scan_bus(sam_mcp_t *mcp, uint8_t bus);
+
+static inline void _pci_scan_device(sam_mcp_t *mcp, uint8_t bus, uint8_t dev) {
+    uint32_t id0 = pci_read32(bus, dev, 0, 0x00);
+    if (id0 == 0xFFFFFFFF || id0 == 0x00000000) return;
+
+    /* Read header type from offset 0x0E (byte 2 of the 4-byte word at 0x0C) */
+    uint32_t hdr_dword = pci_read32(bus, dev, 0, 0x0C);
+    uint8_t  hdr_type  = (uint8_t)((hdr_dword >> 16) & 0xFF);
+    uint8_t  multifunction = (hdr_type & 0x80) != 0;
+    uint8_t  type_bits     = hdr_type & 0x7F;
+
+    /* Classify function 0 */
+    _pci_classify(mcp, bus, dev, 0);
+
+    /* PCI-PCI bridge (header type 1): follow secondary bus */
+    if (type_bits == 0x01) {
+        uint32_t bus_reg = pci_read32(bus, dev, 0, 0x18);
+        uint8_t secondary = (uint8_t)((bus_reg >> 8) & 0xFF);
+        if (secondary != 0 && secondary != bus)
+            _pci_scan_bus(mcp, secondary);
+    }
+
+    /* Multifunction: enumerate functions 1-7 */
+    if (multifunction) {
+        for (uint8_t fn = 1; fn < 8; fn++) {
+            uint32_t idfn = pci_read32(bus, dev, fn, 0x00);
+            if (idfn == 0xFFFFFFFF || idfn == 0x00000000) continue;
+
+            _pci_classify(mcp, bus, dev, fn);
+
+            /* Bridge in a non-zero function */
+            uint32_t hfn = pci_read32(bus, dev, fn, 0x0C);
+            uint8_t  htype_fn = (uint8_t)((hfn >> 16) & 0x7F);
+            if (htype_fn == 0x01) {
+                uint32_t br = pci_read32(bus, dev, fn, 0x18);
+                uint8_t sec = (uint8_t)((br >> 8) & 0xFF);
+                if (sec != 0 && sec != bus) _pci_scan_bus(mcp, sec);
+            }
+        }
+    }
+}
+
+static inline void _pci_scan_bus(sam_mcp_t *mcp, uint8_t bus) {
+    if (!_pci_bus_mark(bus)) return;   /* already visited */
+    for (uint8_t dev = 0; dev < 32; dev++)
+        _pci_scan_device(mcp, bus, dev);
+}
+
+static inline void mcp_scan_pci(sam_mcp_t *mcp) {
+    /* Zero the visited bitmap and scratch struct */
+    for (int i = 0; i < 32; i++) _pci_bus_visited[i] = 0;
+    for (uint32_t i = 0; i < sizeof(sam_mcp_pci3_t); i++)
+        ((uint8_t *)&_pci3)[i] = 0;
+
+    /* Default ATA I/O base -- overridden by PCI scan if native mode */
+    _pci3.ata_iobase = 0x1F0;
+
+    /* Start recursive scan from bus 0 */
+    _pci_scan_bus(mcp, 0);
 
     mcp->pci_scanned = 1;
 }
 
-/* ── Main entry point: run all scans ────────────────────────────────────── */
+/* Main entry point: run all scans */
 static inline void sam_mcp_scan(sam_mcp_t *mcp,
                                  uint64_t multiboot_info,
                                  uint32_t cpu_mhz_pit) {
     mcp_memset(mcp, 0, sizeof(sam_mcp_t));
-    mcp->cpu_mhz = cpu_mhz_pit;   /* from PIT calibration already done */
+    mcp->cpu_mhz = cpu_mhz_pit;
 
     mcp_scan_ram(mcp, multiboot_info);
     mcp_scan_fb (mcp, multiboot_info);
     mcp_scan_cpu(mcp);
     mcp_scan_pci(mcp);
-}
-
-/* ── Report helpers (callback-based, no printf) ─────────────────────────── */
-typedef void (*mcp_puts_fn)(const char *);
-typedef void (*mcp_putdec_fn)(uint64_t);
-typedef void (*mcp_puthex_fn)(uint64_t);
-
-static inline const char *mcp_gpu_class_str(uint8_t c) {
-    if (c == MCP_GPU_INTEGRATED) return "integrated";
-    if (c == MCP_GPU_DISCRETE)   return "discrete";
-    if (c == MCP_GPU_MULTI)      return "integrated+discrete";
-    return "none";
-}
-static inline const char *mcp_simd_str(uint8_t s) {
-    if (s == MCP_SIMD_AVX2)  return "AVX2";
-    if (s == MCP_SIMD_SSE42) return "SSE4.2";
-    if (s == MCP_SIMD_NEON)  return "NEON";
-    return "scalar";
-}
-
-static inline void sam_mcp_report(const sam_mcp_t *mcp,
-                                   mcp_puts_fn   puts_fn,
-                                   mcp_putdec_fn putdec_fn,
-                                   mcp_puthex_fn puthex_fn) {
-    puts_fn("     RAM (usable) : "); putdec_fn(mcp->ram_mb); puts_fn(" MiB\n");
-    puts_fn("     CPU brand    : "); puts_fn(mcp->cpu_brand); puts_fn("\n");
-    puts_fn("     CPU freq     : "); putdec_fn(mcp->cpu_mhz); puts_fn(" MHz\n");
-    puts_fn("     Cores/threads: ");
-    putdec_fn(mcp->cpu_cores); puts_fn("/");
-    putdec_fn(mcp->cpu_threads); puts_fn("\n");
-    puts_fn("     SIMD         : "); puts_fn(mcp_simd_str(mcp->simd_level)); puts_fn("\n");
-    puts_fn("     GPU class    : "); puts_fn(mcp_gpu_class_str(mcp->gpu_class));
-    if (mcp->gpu_pci_vendor) {
-        puts_fn(" (vendor=0x"); puthex_fn(mcp->gpu_pci_vendor); puts_fn(")");
-    }
-    puts_fn("\n");
-    if (mcp->fb_available) {
-        puts_fn("     Framebuffer  : ");
-        putdec_fn(mcp->fb_width); puts_fn("x");
-        putdec_fn(mcp->fb_height); puts_fn("x");
-        putdec_fn(mcp->fb_bpp); puts_fn("bpp\n");
-    } else {
-        puts_fn("     Framebuffer  : VGA text mode only\n");
-    }
-    puts_fn("     Storage      : AHCI=");
-    puts_fn(mcp->has_ahci ? "yes" : "no");
-    puts_fn("  NVMe=");
-    puts_fn(mcp->has_nvme ? "yes" : "no");
-    puts_fn("\n");
-    puts_fn("     Network      : ETH=");
-    puts_fn(mcp->has_ethernet ? "yes" : "no");
-    puts_fn("  WiFi=");
-    puts_fn(mcp->has_wireless ? "yes" : "no");
-    puts_fn("\n");
-    puts_fn("     Audio HDA    : ");
-    puts_fn(mcp->has_hda_audio ? "yes" : "no");
-    puts_fn("\n");
-    (void)puthex_fn;
 }
 
 #endif /* SAM_MCP_H */

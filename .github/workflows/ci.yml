@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nasm \
+            gcc \
+            binutils \
+            grub-pc-bin \
+            grub-common \
+            xorriso \
+            mtools \
+            qemu-system-x86
+
+      - name: Build ISO
+        run: make
+
+      - name: Headless boot test (QEMU serial markers)
+        run: make test
+
+      - name: Upload serial log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-log
+          path: build/serial.log

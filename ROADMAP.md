@@ -1,6 +1,7 @@
 # SAM OS — Realistic Growth Plan
 
-Current state: **Sprint 13 complete.** Graphical OOBE wizard working, kernel shell
+Current state: **Sprint 15 complete.** Phase 2 (IDT, panic screen, E820 validation)
+and Sprint 15 hardware work (ACPI, PS/2 IRQ keyboard, ATA PIO disk) done. Kernel shell
 live at `SAM>` prompt. All prior sprint claims (SIMD, STF, domain isolation,
 PCI scan, VESA framebuffer) verified on VirtualBox via boot logs.
 

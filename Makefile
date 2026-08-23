@@ -80,6 +80,7 @@ $(ASM_OBJ): $(ASM_SRC) | $(BUILD)
 # ── Kernel headers (any change triggers C recompile) ─────────
 KERNEL_HEADERS := kernel/mcp.h kernel/fb.h kernel/boot_config.h \
                   kernel/panic.h kernel/idt.h \
+                  kernel/acpi.h kernel/ps2kbd.h kernel/ata.h \
                   kernel/wizard.h kernel/shell.h kernel/simd.h \
                   kernel/scheduler.h kernel/stf.h
 
@@ -151,7 +152,7 @@ run-game: $(ISO)
 #   [PASS] matmul
 #   [PASS] benchmark
 #   [PASS] STF
-#   Sprint 14 PASS
+#   Sprint 15 PASS
 #
 SERIAL_LOG := $(BUILD)/serial.log
 TEST_TIMEOUT := 30   # seconds before QEMU is killed
@@ -173,7 +174,7 @@ test: $(ISO)
 	for marker in \
 	    "dot\(\[1\.\.32\]" \
 	    "\[PASS\]" \
-	    "Sprint 14 PASS"; \
+	    "Sprint 15 PASS"; \
 	do \
 	    if grep -qE "$$marker" $(SERIAL_LOG) 2>/dev/null; then \
 	        echo "  [OK]  $$marker"; \
