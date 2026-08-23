@@ -4,6 +4,8 @@
 
 A bare-metal x86-64 research kernel exploring CPU-only AI inference and retro game domains on old hardware — no GPU, no OS overhead.
 
+> **Why?** Millions of capable machines are abandoned by vendor-locked update cycles while AI demand inflates hardware prices. SAM OS revives them as sovereign, on-device AI appliances. See [VISION.md](VISION.md) — including the Make-in-India alignment.
+
 > **Status: Research prototype, Sprint 15.** Boot → graphical OOBE wizard → interactive kernel shell. What works today is real. What comes next is clearly labelled.
 
 ---

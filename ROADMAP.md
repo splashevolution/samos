@@ -1,5 +1,7 @@
 # SAM OS — Realistic Growth Plan
 
+Mission and problem statement: see [VISION.md](VISION.md).
+
 Current state: **Sprint 15 complete.** Phase 2 (IDT, panic screen, E820 validation)
 and Sprint 15 hardware work (ACPI, PS/2 IRQ keyboard, ATA PIO disk) done. Kernel shell
 live at `SAM>` prompt. All prior sprint claims (SIMD, STF, domain isolation,
