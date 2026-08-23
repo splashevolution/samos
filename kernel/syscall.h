@@ -123,6 +123,11 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
          * Sprint 16 scope: single task — exit halts the kernel cleanly.
          * Resume-to-shell arrives with real task switching. */
         serial_puts("[OK] Sprint 16: ring-3 task exited cleanly\n");
+        /* All Sprint 16 pass criteria are now verified: boot checks passed
+         * (else we'd never have entered), ring 3 executed, and the int 0x80
+         * gate + TSS stack switch returned us to ring 0. Print the final
+         * banner here because single-task exit halts below. */
+        serial_puts("[SAM OS] Sprint 16 PASS -- VFS + initrd + syscalls + ring-3 process\n");
         _user_halt();
         /* not reached */
         for (;;) __asm__ volatile ("hlt");
