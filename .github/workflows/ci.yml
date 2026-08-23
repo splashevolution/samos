@@ -30,9 +30,11 @@ jobs:
       - name: Headless boot test (QEMU serial markers)
         run: make test
 
-      - name: Upload serial log on failure
+      - name: Upload debug artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: serial-log
-          path: build/serial.log
+          name: debug
+          path: |
+            build/serial.log
+            build/kernel.map

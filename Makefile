@@ -57,7 +57,8 @@ CFLAGS   := -m64 \
 LDFLAGS  := -m elf_x86_64 \
              -T kernel/linker.ld \
              -nostdlib \
-             -z max-page-size=0x1000
+             -z max-page-size=0x1000 \
+             -Map $(BUILD)/kernel.map
 
 # ── Sources ───────────────────────────────────────────────────
 ASM_SRC  := kernel/boot.asm kernel/userasm.asm
