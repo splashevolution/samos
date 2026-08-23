@@ -55,7 +55,9 @@ uint64_t sam_kernel_rbp;
 uint64_t sam_kernel_ret;
 
 /* ── Enter ring 3 (never returns normally; exits via _user_exit) ─────── */
-static void sam_user_enter(uint64_t rip, uint64_t user_rsp) {
+/* MUST NOT be inlined: the asm relies on a real call frame (return
+ * address on the stack) — see the movq 0x30(%rsp) stash below. */
+static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user_rsp) {
     __asm__ volatile (
         "pushfq\n\t"
         "movq %%rbp, %1\n\t"
