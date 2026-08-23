@@ -507,9 +507,11 @@ rax = syscall nr | rdi = arg0 | rsi = arg1 | rdx = arg2 | result in rax
   3 = read(fd, buf, len)    returns 0 (EOF) until stdin is wired
 ```
 
-**Honest scope**: one user task, no page-table isolation yet (ring 3 blocks
-privileged instructions but not memory access), flat-binary executables (not ELF),
-no preemption. Per-task CR3 and an ELF subset loader are the next Phase 4 steps.
+**Honest scope**: one user task; the `exit(2)` syscall verifies the ring-3
+return leg (gate DPL=3 → TSS.RSP0 stack switch back to ring 0) and then halts
+the kernel cleanly — resume-to-shell waits for real task switching. No page-table
+isolation yet (GiB 0-1 are mapped user-accessible until per-task CR3 arrives),
+flat-binary executables (not ELF), no preemption. Those are the next Phase 4 steps.
 
 ---
 
