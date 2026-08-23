@@ -160,6 +160,18 @@ run-vga: $(ISO)
 run-game: $(ISO)
 	$(QEMU) $(QEMUOPTS) -vga std -serial mon:stdio
 
+# ── CI ISO: same payload, grub config passes "ci" to skip the wizard ──
+CI_ISO := $(BUILD)/sam_os_ci.iso
+
+.PHONY: iso-ci
+iso-ci: $(KERNEL) $(GGUF_FILE) $(STF_FILE) $(INITRD) | $(GRUB_DIR)
+	cp $(KERNEL)    $(BOOT_DIR)/$(TARGET).elf
+	cp $(GGUF_FILE) $(BOOT_DIR)/test.gguf
+	cp $(STF_FILE)  $(BOOT_DIR)/test_model.stf
+	cp $(INITRD)    $(BOOT_DIR)/initrd.tar
+	cp kernel/grub.ci.cfg $(GRUB_DIR)/grub.cfg
+	GRUB_MKRESCUE_XORRISO=/usr/bin/xorriso /usr/bin/grub-mkrescue -o $(CI_ISO) $(ISO_DIR)
+
 # ── Headless test (Phase 1: truth stabilization) ─────────────
 # Boots the ISO in QEMU, captures serial output, checks for PASS strings.
 # Exits 0 on success, 1 if any expected marker is missing or FAIL is found.
@@ -170,17 +182,17 @@ run-game: $(ISO)
 #   [PASS] matmul
 #   [PASS] benchmark
 #   [PASS] STF
-#   Sprint 15 PASS
+#   Sprint 16 PASS   (ring-3 hello process)
 #
 SERIAL_LOG := $(BUILD)/serial.log
-TEST_TIMEOUT := 30   # seconds before QEMU is killed
+TEST_TIMEOUT := 45   # seconds before QEMU is killed (TCG is slow)
 
 .PHONY: test
-test: $(ISO)
+test: iso-ci
 	@echo "=== SAM OS headless test ($(TEST_TIMEOUT)s timeout) ==="
 	@rm -f $(SERIAL_LOG)
 	@timeout $(TEST_TIMEOUT) $(QEMU) \
-	    -m 512M -no-reboot -cdrom $(ISO) \
+	    -m 512M -no-reboot -cdrom $(CI_ISO) \
 	    -display none \
 	    -serial file:$(SERIAL_LOG) \
 	    -cpu qemu64 \

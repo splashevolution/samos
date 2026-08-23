@@ -329,10 +329,39 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         serial_puts("[OK] Sprint 10-B: VGA text fallback (no pixel framebuffer)\n");
     }
 
+    /* Sprint 16: headless CI mode — multiboot2 cmdline containing the
+     * standalone word "ci" skips the interactive first-boot wizard. */
+    #define MB2_TAG_CMDLINE 1
+    int ci_mode = 0;
+    {
+        uint8_t *cp = (uint8_t *)(uintptr_t)multiboot_info + 8;
+        for (;;) {
+            mb2_tag_t *tag = (mb2_tag_t *)cp;
+            if (tag->type == MB2_TAG_END) break;
+            if (tag->type == MB2_TAG_CMDLINE) {
+                const char *s = (const char *)(cp + 8);
+                for (int i = 0; s[i]; i++) {
+                    if (s[i]=='c' && s[i+1]=='i' &&
+                        (i==0 || s[i-1]==' ') &&
+                        (s[i+2]=='\0' || s[i+2]==' ')) {
+                        ci_mode = 1; break;
+                    }
+                }
+            }
+            uint32_t next = (tag->size + 7) & ~7u;
+            if (next == 0) break;
+            cp += next;
+        }
+    }
+
     /* Sprint 13: First-boot graphical OOBE wizard */
-    serial_puts("[OK] Sprint 13: First-boot wizard starting\n");
-    sam_wizard_run(&mcp);
-    serial_puts("[OK] Sprint 13: First-boot wizard complete\n");
+    if (!ci_mode) {
+        serial_puts("[OK] Sprint 13: First-boot wizard starting\n");
+        sam_wizard_run(&mcp);
+        serial_puts("[OK] Sprint 13: First-boot wizard complete\n");
+    } else {
+        serial_puts("[OK] CI mode: skipping first-boot wizard (headless)\n");
+    }
 
     /* Sprint 10-D: Read config and allocate dynamic domains */
     sam_boot_config_t bcfg;
@@ -350,6 +379,9 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         bcfg.game_size    = GAME_DOMAIN_SIZE;
         bcfg.general_size = GENERAL_DOMAIN_SIZE;
         bcfg.mode         = BOOT_MODE_GENERAL;
+        bcfg.mode_name[0] = 'g'; bcfg.mode_name[1] = 'e'; bcfg.mode_name[2] = 'n';
+        bcfg.mode_name[3] = 'e'; bcfg.mode_name[4] = 'r'; bcfg.mode_name[5] = 'a';
+        bcfg.mode_name[6] = 'l'; bcfg.mode_name[7] = '\0';
     }
 
     /* 1. Multiboot2 handshake */
@@ -997,11 +1029,15 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     vga_puts("============================================================\n", VGA_CYAN);
     serial_puts("============================================================\n");
 
-    /* Sprint 13: Drop into interactive kernel shell */
+    /* Sprint 13: Drop into interactive kernel shell (skipped in CI mode) */
     if (g_fb.ready)
         fb_fill_rect(0, 0, g_fb.width, g_fb.height, 0x00000000);
-    serial_puts("[OK] Sprint 13: Entering kernel shell\n");
-    sam_shell_run(&mcp, &bcfg);
+    if (!ci_mode) {
+        serial_puts("[OK] Sprint 13: Entering kernel shell\n");
+        sam_shell_run(&mcp, &bcfg);
+    } else {
+        serial_puts("[OK] CI mode: boot sequence complete, halting\n");
+    }
 
     /* Should never return */
     for (;;) __asm__ volatile ("hlt");
