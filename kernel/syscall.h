@@ -125,12 +125,12 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
         serial_puts("[OK] Sprint 16: ring-3 task exited cleanly\n");
         {
             extern uint64_t sam_kernel_rsp;
-            uint64_t dbg_rsp, dbg_val;
+            extern uint64_t sam_kernel_ret;
+            uint64_t dbg_rsp;
             __asm__ volatile ("movq %%rsp, %0" : "=r"(dbg_rsp));
-            dbg_val = sam_kernel_rsp;
             serial_puts("     [dbg] isr rsp="); serial_puthex(dbg_rsp);
-            serial_puts("  saved="); serial_puthex(dbg_val);
-            if (dbg_val == 0xDEADBEEFCAFEBABEULL) serial_puts("  <== CORRUPTED!");
+            serial_puts("  saved="); serial_puthex(sam_kernel_rsp);
+            serial_puts("  ret="); serial_puthex(sam_kernel_ret);
             serial_puts("\n");
         }
         _user_exit();
