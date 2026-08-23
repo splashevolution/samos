@@ -47,31 +47,34 @@
 extern void _syscall80(void);
 extern void _user_exit(void);
 
-/* Kernel stack pointer saved by _user_enter, consumed by _user_exit */
+/* Kernel stack pointer saved by _user_enter, consumed by _user_exit.
+ * RBP cannot be listed as an asm clobber (GCC rejects it), so it is
+ * stashed in this global instead of on the stack. */
 extern uint64_t sam_kernel_rsp;
+uint64_t sam_kernel_rbp;
 
 /* ── Enter ring 3 (never returns normally; exits via _user_exit) ─────── */
 static void sam_user_enter(uint64_t rip, uint64_t user_rsp) {
     __asm__ volatile (
         "pushfq\n\t"
+        "movq %%rbp, %1\n\t"
         "push %%rbx\n\t"
-        "push %%rbp\n\t"
         "push %%r12\n\t"
         "push %%r13\n\t"
         "push %%r14\n\t"
         "push %%r15\n\t"
-        "mov %%rsp, %0\n\t"
+        "movq %%rsp, %0\n\t"
         /* Build the interrupt frame for iretq to ring 3 */
-        "push %q2\n\t"          /* SS   = user data  */
-        "push %1\n\t"           /* RSP  = user stack */
+        "push %q3\n\t"          /* SS   = user data  */
+        "push %2\n\t"           /* RSP  = user stack */
         "push $0x202\n\t"       /* RFLAGS: IF=1, reserved bit 1 */
-        "push %q3\n\t"          /* CS   = user code  */
-        "push %4\n\t"           /* RIP  = entry      */
+        "push %q4\n\t"          /* CS   = user code  */
+        "push %5\n\t"           /* RIP  = entry      */
         "iretq\n\t"
-        : "=m"(sam_kernel_rsp)
+        : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp)
         : "r"(user_rsp), "r"((uint64_t)SEL_USER_DATA),
           "r"((uint64_t)SEL_USER_CODE), "r"(rip)
-        : "rbx", "rbp", "r12", "r13", "r14", "r15", "cc"
+        : "rbx", "r12", "r13", "r14", "r15", "cc"
     );
     /* Not reached when the task exits cleanly. If it somehow falls through,
      * halt here rather than corrupt kernel state. */

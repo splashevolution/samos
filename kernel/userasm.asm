@@ -15,6 +15,7 @@
 global _user_enter
 global _user_exit
 global sam_kernel_rsp
+extern sam_kernel_rbp
 
 section .data
 sam_kernel_rsp: dq 0
@@ -51,11 +52,11 @@ _user_enter:
 _user_exit:
     ; Resume exactly where the kernel thread left off.
     mov rsp, [rel sam_kernel_rsp]
+    mov rbp, [rel sam_kernel_rbp]
     pop r15
     pop r14
     pop r13
     pop r12
-    pop rbp
     pop rbx
     popfq
     xor eax, eax
