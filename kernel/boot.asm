@@ -96,6 +96,14 @@ tss:
     resd 10                 ; 280-319 reserved (IO map base = 104 -> no map)
 tss_end:
 
+; Sprint 16: dedicated interrupt stack for ring3 -> ring0 transitions.
+; Must NOT overlap the kernel boot stack: ISRs landing here start at
+; ist_stack_top and would otherwise trample the saved kernel frame.
+alignb 16
+ist_stack_bottom:
+    resb STACK_SIZE
+ist_stack_top:
+
 ; ============================================================
 ; Section: .text  (32-bit entry — GRUB drops us here)
 ; ============================================================
@@ -274,8 +282,8 @@ bits 64
     mov  [rel gdt_tss + 7], al          ; base 31:24
     ; (base 63:32 stays 0 — kernel lives below 4 GiB)
 
-    mov  eax, stack_top
-    mov  [rel tss + 4], eax             ; TSS.RSP0 = kernel stack top
+    mov  eax, ist_stack_top
+    mov  [rel tss + 4], eax             ; TSS.RSP0 = dedicated IRQ stack
 
     mov  ax, GDT_TSS
     ltr  ax
