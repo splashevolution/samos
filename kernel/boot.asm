@@ -231,7 +231,7 @@ _start:
     mov  cr0, eax
 
     ; ── 8. Far jump into 64-bit code segment ─────────────────
-    lgdt [gdt64.pointer]
+    lgdt [gdt_pointer]
     jmp  GDT_CODE64:.long_mode_entry
 
 .no_cpuid:
@@ -340,6 +340,6 @@ gdt_tss:
     dd 0                            ; base 63:32  (patched)
     dd 0                            ; reserved
 
-.pointer:
+gdt_pointer:
     dw ($ - gdt64 - 1)     ; limit
     dq gdt64               ; base
