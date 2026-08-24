@@ -51,9 +51,11 @@ static void *vmm_alloc_pt(void) {
 }
 
 /* ── Build a user address space. Returns physical addr of new PML4 ────── */
-/* The caller then copies the task image to USER_CODE_BASE while still in
- * the kernel address space, and switches CR3 via sam_user_enter().        */
-static uint64_t vmm_create_user_as(void) {
+/* `base` is the task's user-region start (2 MiB aligned); its 4 MiB
+ * window [base, base+4MiB) becomes ring-3 accessible, everything else
+ * supervisor-only. Sprint 21: per-task bases allow two resident tasks
+ * to live at different addresses side by side.                        */
+static uint64_t vmm_create_user_as_at(uint64_t base) {
     uint64_t *npml4 = (uint64_t *)vmm_alloc_pt();
     uint64_t *npdpt = (uint64_t *)vmm_alloc_pt();
     uint64_t *npd   = (uint64_t *)vmm_alloc_pt();
@@ -72,16 +74,21 @@ static uint64_t vmm_create_user_as(void) {
         npdpt[i] = (pdpt_table[i] & ~0x04ULL) | 0x03;
 
     /* Fresh PD for GiB 0: every 2 MiB page supervisor-only RW, except the
-     * two pages that form the user region. */
+     * two pages forming this task's window [base, base+4MiB). */
     for (int i = 0; i < 512; i++) {
-        uint64_t base = (uint64_t)i << 21;
-        npd[i] = base | 0x83;                       /* present+rw+2MiB */
+        uint64_t b = (uint64_t)i << 21;
+        npd[i] = b | 0x83;                          /* present+rw+2MiB */
     }
-    npd[(USER_CODE_BASE >> 21) & 511] |= 0x04;      /* code page: U/S=1 */
-    npd[((USER_STACK_TOP - 1) >> 21) & 511] |= 0x04;/* stack page: U/S=1 */
+    npd[(base >> 21) & 511]                    |= 0x04;  /* code page: U/S=1 */
+    npd[((base + 0x400000UL - 1) >> 21) & 511] |= 0x04;  /* stack page: U/S=1 */
 
     /* Physical address of PML4 == its virtual address (identity map). */
     return (uint64_t)(uintptr_t)npml4;
+}
+
+/* Default layout wrapper (single task at the classic base). */
+static uint64_t vmm_create_user_as(void) {
+    return vmm_create_user_as_at(USER_CODE_BASE);
 }
 
 /* ── Reset the allocator (called once at boot before any task runs) ───── */

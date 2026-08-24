@@ -365,24 +365,49 @@ static void cmd_unknown(sam_shell_t *sh, const char *cmd) {
     sh_puts(sh, "  (type 'help')\n", SH_GREY);
 }
 
-/* Sprint 19: `run <name>` — load an ELF from the initrd and run it in
- * ring 3 (own address space). The kernel resumes when the task exits
- * or faults. sam_run_task() is provided by main.c. */
-static int sam_run_task(const char *name);
+/* Sprint 19/22: `run <name> [args...]` — load an ELF from the initrd and
+ * run it in ring 3 with argv; kernel resumes when the task exits/faults.
+ * sam_run_task() is provided by main.c. */
+static int sam_run_task(const char *name, char **argv, int argc);
+extern uint64_t g_exit_code;   /* defined in syscall.h (main.c TU) */
 
 static void cmd_run(sam_shell_t *sh, const char *args) {
-    /* trim leading spaces */
-    while (*args == ' ') args++;
-    if (!*args) {
-        sh_puts(sh, "\n  Usage: run <name>   (e.g. run hello.elf)\n", SH_YELLOW);
+    /* Tokenize args into av[] (in-place on a local copy) */
+    char buf[SH_CMD_MAX + 1];
+    int n = 0;
+    while (args[n]) { buf[n] = args[n]; n++; }
+    buf[n] = '\0';
+
+    char *av[8];
+    int ac = 0;
+    int i2 = 0;
+    while (buf[i2] && ac < 8) {
+        while (buf[i2] == ' ') i2++;
+        if (!buf[i2]) break;
+        av[ac++] = &buf[i2];
+        while (buf[i2] && buf[i2] != ' ') i2++;
+        if (buf[i2]) { buf[i2] = '\0'; i2++; }
+    }
+
+    if (ac == 0) {
+        sh_puts(sh, "\n  Usage: run <name> [args...]\n", SH_YELLOW);
         return;
     }
+
     sh_puts(sh, "\n  [run] starting ", SH_CYAN);
-    sh_puts(sh, args, SH_CYAN);
+    sh_puts(sh, av[0], SH_CYAN);
+    for (int a = 1; a < ac; a++) {
+        sh_puts(sh, " ", SH_CYAN);
+        sh_puts(sh, av[a], SH_CYAN);
+    }
     sh_puts(sh, "\n", SH_CYAN);
 
-    int r = sam_run_task(args);
-    if (r == TASK_END_EXIT)       sh_puts(sh, "  [run] task exited cleanly\n", SH_GREEN);
+    int r = sam_run_task(av[0], av, ac);
+    if (r == TASK_END_EXIT) {
+        sh_puts(sh, "  [run] task exited with code ", SH_GREEN);
+        sh_putdec(sh, g_exit_code, SH_GREEN);
+        sh_puts(sh, "\n", SH_GREEN);
+    }
     else if (r == TASK_END_FAULT) sh_puts(sh, "  [run] task faulted (isolation held)\n", SH_YELLOW);
     else                          sh_puts(sh, "  [run] task failed to start\n", SH_RED);
 }

@@ -42,8 +42,9 @@ typedef struct {
 
 /* Returns 0 on success and fills *entry_out. Negative on error:
  *  -1 bad magic/class/type   -2 no PT_LOAD segments
- *  -3 segment outside user region   -4 truncated image */
-static int elf_load(const void *image, uint32_t image_size, uint64_t *entry_out)
+ *  -3 segment outside [lo,hi)        -4 truncated image */
+static int elf_load_in(const void *image, uint32_t image_size,
+                       uint64_t *entry_out, uint64_t lo, uint64_t hi)
 {
     const uint8_t *img = (const uint8_t *)image;
     if (image_size < sizeof(sam_elf_ehdr_t)) return -1;
@@ -67,9 +68,9 @@ static int elf_load(const void *image, uint32_t image_size, uint64_t *entry_out)
         const sam_elf_phdr_t *ph = (const sam_elf_phdr_t *)phb;
         if (ph->p_type != SAM_ELF_PT_LOAD) continue;
 
-        /* Region check: whole memory image inside the user region */
-        if (ph->p_vaddr < USER_CODE_BASE) return -3;
-        if (ph->p_vaddr + ph->p_memsz > USER_STACK_TOP) return -3;
+        /* Region check: whole memory image inside the task's window */
+        if (ph->p_vaddr < lo) return -3;
+        if (ph->p_vaddr + ph->p_memsz > hi) return -3;
         if (ph->p_offset + ph->p_filesz > image_size) return -4;
 
         uint8_t *dst = (uint8_t *)(uintptr_t)ph->p_vaddr;
@@ -82,6 +83,13 @@ static int elf_load(const void *image, uint32_t image_size, uint64_t *entry_out)
     if (!loaded) return -2;
     *entry_out = eh->e_entry;
     return 0;
+}
+
+/* Classic single-task wrapper (default user window). */
+static int elf_load(const void *image, uint32_t image_size, uint64_t *entry_out)
+{
+    return elf_load_in(image, image_size, entry_out,
+                       USER_CODE_BASE, USER_STACK_TOP);
 }
 
 #endif /* SAM_ELF_H */
