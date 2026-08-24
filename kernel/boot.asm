@@ -9,6 +9,13 @@
 global _start
 extern kernel_main
 
+; Sprint 17: page-table roots exported so the VMM (kernel/vmm.h) can clone
+; the boot address space for per-task user address spaces.
+global pml4_table
+global pdpt_table
+global pd_table0
+global tss
+
 ; ── Multiboot2 constants ─────────────────────────────────────
 MULTIBOOT2_MAGIC    equ 0xE85250D6
 MULTIBOOT_ARCH_I386 equ 0

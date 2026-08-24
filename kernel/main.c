@@ -20,6 +20,7 @@
 #include "wizard.h"
 #include "shell.h"
 #include "vfs.h"       /* Sprint 16: initrd ustar VFS */
+#include "vmm.h"       /* Sprint 17: per-task address spaces */
 
 /*
  * Define all 32 CPU exception ISR stubs + _isr_common in the .text section.
@@ -916,6 +917,8 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     int sprint10_sentinel_ok = s10_ai_ok && s10_gm_ok && s10_gn_ok;
 
     /* 13. Sprint 16 / Phase 4: VFS + initrd + syscalls + first ring-3 process */
+
+    vmm_init();
     vga_puts("\n[OK] Sprint 16: VFS + initrd + ring-3 process\n", VGA_GREEN);
     serial_puts("\n[OK] Sprint 16: VFS + initrd + ring-3 process\n");
 
@@ -989,7 +992,16 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
                     vga_puts("     [PASS] ring-3 process ran + exited via syscall\n", VGA_GREEN);
                     serial_puts("     Entering ring 3...\n");
 
-                    sam_user_enter(USER_CODE_BASE, USER_STACK_TOP);
+                    /* Sprint 17: fresh address space — only the user region
+                     * is ring-3 accessible; kernel memory is supervisor-only. */
+                    uint64_t user_cr3 = vmm_create_user_as();
+                    if (!user_cr3) {
+                        serial_puts("     [FAIL] vmm_create_user_as: out of page-table pages\n");
+                        vga_puts("     [FAIL] VMM alloc\n", VGA_RED);
+                    } else {
+                        serial_puts("     [OK] Sprint 17: user address space built\n");
+                        sam_user_enter(USER_CODE_BASE, USER_STACK_TOP, user_cr3);
+                    }
 
                     /* Not reached in Sprint 16: exit halts. Resume-to-shell
                      * arrives with real task switching (Phase 4 continues). */

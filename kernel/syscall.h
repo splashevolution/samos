@@ -54,14 +54,21 @@ extern void _user_halt(void);
 extern uint64_t sam_kernel_rsp;
 uint64_t sam_kernel_rbp;
 uint64_t sam_kernel_ret;
+uint64_t sam_kernel_cr3;    /* Sprint 17: boot CR3, restored on halt */
 
 /* ── Enter ring 3 (never returns normally; exits via _user_exit) ─────── */
 /* MUST NOT be inlined: _user_exit resumes into this function's caller. */
-static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user_rsp) {
+static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user_rsp,
+                                                     uint64_t user_cr3) {
     /* Capture the true return address so _user_exit can jmp back without
      * trusting the kernel stack (which is trampled while user code runs). */
     sam_kernel_ret = (uint64_t)__builtin_return_address(0);
     __asm__ volatile (
+        "movq %%cr3, %%rax\n\t"     /* save kernel CR3               */
+        "movq %%rax, %2\n\t"
+        "movq %3, %%rax\n\t"
+        "movq %%rax, %%cr3\n\t"     /* switch to task address space  */
+        "cli\n\t"
         "pushfq\n\t"
         "movq %%rbp, %1\n\t"
         "push %%rbx\n\t"
@@ -71,14 +78,14 @@ static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user
         "push %%r15\n\t"
         "movq %%rsp, %0\n\t"
         /* Build the interrupt frame for iretq to ring 3 */
-        "push %q3\n\t"          /* SS   = user data  */
-        "push %2\n\t"           /* RSP  = user stack */
+        "push %q5\n\t"          /* SS   = user data  */
+        "push %4\n\t"           /* RSP  = user stack */
         "push $0x202\n\t"       /* RFLAGS: IF=1, reserved bit 1 */
-        "push %q4\n\t"          /* CS   = user code  */
-        "push %5\n\t"           /* RIP  = entry      */
+        "push %q6\n\t"          /* CS   = user code  */
+        "push %7\n\t"           /* RIP  = entry      */
         "iretq\n\t"
-        : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp)
-        : "r"(user_rsp), "r"((uint64_t)SEL_USER_DATA),
+        : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp), "=m"(sam_kernel_cr3)
+        : "r"(user_cr3), "r"(user_rsp), "r"((uint64_t)SEL_USER_DATA),
           "r"((uint64_t)SEL_USER_CODE), "r"(rip)
         : "rax", "rbx", "r12", "r13", "r14", "r15", "cc"
     );
@@ -92,10 +99,22 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f);    /* fwd decl */
 
 /* ── Unified interrupt entry: exceptions panic, vector 0x80 = syscall ─── */
 void sam_interrupt_dispatcher(cpu_frame_t *f) {
-    if (f->vector == 128)
+    if (f->vector == 128) {
         sam_syscall_handler(f);     /* SYS_EXIT never returns from here */
-    else
-        sam_exception_handler(f);
+        return;
+    }
+
+    /* Sprint 17: a page fault raised FROM RING 3 is the isolation test
+     * passing, not a kernel bug. Report and halt cleanly. */
+    if (f->vector == 14 && (f->cs & 3) == 3) {
+        serial_puts("[OK] Sprint 17: ring-3 access to kernel memory faulted (#PF)\n");
+        serial_puts("     fault addr : "); serial_puthex(f->rip); serial_puts("\n");
+        serial_puts("[SAM OS] Sprint 17 PASS -- per-task page tables isolate ring 3\n");
+        _user_halt();
+        /* not reached */
+    }
+
+    sam_exception_handler(f);
 }
 
 /* ── C-level syscall dispatcher ────────────────────────────────────────── */

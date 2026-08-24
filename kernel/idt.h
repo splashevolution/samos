@@ -204,8 +204,11 @@ __asm__ ( \
     /* Align stack to 16 bytes for System V ABI */ \
     "and $-16, %rsp\n\t" \
     "sub $8, %rsp\n\t"   \
+    /* Save the frame pointer ON THE STACK: the C dispatcher clobbers \
+     * rdi (caller-saved), so it must not be trusted across the call. */ \
+    "push %rdi\n\t" \
     "call sam_interrupt_dispatcher\n\t" \
-    "add $8, %rsp\n\t"   \
+    "pop %rdi\n\t" \
     "mov %rdi, %rsp\n\t" \
     /* Restore GP regs */ \
     "pop %r15\n\t" \

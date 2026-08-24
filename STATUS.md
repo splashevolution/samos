@@ -515,6 +515,36 @@ flat-binary executables (not ELF), no preemption. Those are the next Phase 4 ste
 
 ---
 
+### Sprint 17 — Phase 4: Per-Task Page Tables (Real Ring-3 Isolation)  ✅
+**Date**: 2026-08-23
+**Goal**: Ring 3 must not be able to touch kernel memory. Make isolation real.
+
+**Files added / modified**:
+| File | Purpose |
+|------|---------|
+| `kernel/vmm.h` | Bump page-table allocator + `vmm_create_user_as()`: fresh PML4 per task; user region (2×2 MiB at 0x19000000/0x19200000) U/S=1, everything else supervisor-only |
+| `kernel/syscall.h` | CR3 save/switch in `sam_user_enter()`; ring-3 `#PF` dispatcher branch reports isolation PASS |
+| `kernel/userasm.asm` | `_user_halt` restores kernel CR3 before halting |
+| `kernel/boot.asm` | Export `pml4_table`/`pdpt_table`/`pd_table0`/`tss`; clear CR4.PCIDE (stale-TLB hazard) |
+| `kernel/idt.h` | **Critical fix**: `_isr_common` saved its frame pointer in RDI across the C call — caller-saved! Now saved on the stack. This latent bug corrupted the kernel stack whenever GCC's register allocation changed |
+| `user/hello.asm` | Phase 2: deliberately reads 0x100000 → #PF → isolation proven |
+
+**What Sprint 17 demonstrates**:
+```
+[ring3] Hello from the first SAM OS user process!
+[ring3] write + exit syscalls OK
+[ring3] Phase 2: touching kernel memory at 0x100000...
+[OK] Sprint 17: ring-3 access to kernel memory faulted (#PF)
+[SAM OS] Sprint 17 PASS -- per-task page tables isolate ring 3
+```
+
+**Honest scope**: one user task at a time; exit/isolation-fault halts cleanly
+(resume-to-shell = real task switching, next). No demand paging, no swap,
+flat-binary executables. The U/S bits are enforced by hardware on every access —
+the PSL `user_cannot_store` invariant now has a hardware enforcement point.
+
+---
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
@@ -524,7 +554,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 | 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
 | 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
 | 3 — Hardware | ACPI, PS/2 IRQ keyboard, ATA PIO disk | ✅ Done (Sprint 15); full PCI scan + USB HID remain |
-| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 Started (Sprint 16); next: per-task CR3, ELF loader, preemption |
+| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 In progress; Sprint 16 (VFS+syscalls+ring3) + Sprint 17 (per-task CR3 isolation) done. Next: task switching, ELF loader |
 | 5 — Inference | Real model end-to-end on bare metal | Future |
 | 6 — Compatibility | SAM ABI → Lua → WASM → Linux compat | Far future |
 

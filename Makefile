@@ -84,7 +84,7 @@ $(BUILD)/userasm.o: kernel/userasm.asm | $(BUILD)
 # ── Kernel headers (any change triggers C recompile) ─────────
 KERNEL_HEADERS := kernel/mcp.h kernel/fb.h kernel/boot_config.h \
                   kernel/panic.h kernel/idt.h kernel/syscall.h kernel/vfs.h \
-                  kernel/acpi.h kernel/ps2kbd.h kernel/ata.h \
+                  kernel/vmm.h kernel/acpi.h kernel/ps2kbd.h kernel/ata.h \
                   kernel/wizard.h kernel/shell.h kernel/simd.h \
                   kernel/scheduler.h kernel/stf.h
 
@@ -205,7 +205,7 @@ test: iso-ci
 	for marker in \
 	    "dot\(\[1\.\.32\]" \
 	    "\[PASS\]" \
-	    "Sprint 16 PASS"; \
+	    "Sprint 17 PASS"; \
 	do \
 	    if grep -qE "$$marker" $(SERIAL_LOG) 2>/dev/null; then \
 	        echo "  [OK]  $$marker"; \
