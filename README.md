@@ -48,7 +48,7 @@ SAM> run hello.elf
 SAM> run guard.elf        # deliberately touches kernel memory → #PF → isolation held
 ```
 
-**Not present yet:** preemption (cooperative only), multiple resident tasks, filesystem writeback, storage driver integration with VFS (ATA read is standalone), network stack, real model inference, dynamic linking/PIE, argv.
+**Not present yet:** multiple resident tasks (preemption exists — the PIT interrupts a task and resumes it mid-instruction — but only one runnable task at a time), filesystem writeback, storage driver integration with VFS (ATA read is standalone), network stack, real model inference, dynamic linking/PIE, argv.
 
 ---
 
