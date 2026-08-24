@@ -15,9 +15,11 @@
 global _user_enter
 global _user_exit
 global _user_halt
+global sam_user_resume
 global sam_kernel_rsp
 extern sam_kernel_rbp
 extern sam_kernel_ret
+extern sam_kernel_cr3
 
 section .data
 sam_kernel_rsp: dq 0
@@ -69,9 +71,48 @@ _user_exit:
     jmp [rel sam_kernel_ret]
 
 _user_halt:
-    ; Sprint 16 exit semantics: single-task system — the demo task is done,
+    ; Sprint 17 exit semantics: single-task system — the demo task is done,
     ; so the kernel parks with interrupts disabled. Clean and verifiable.
     cli
 .halt:
     hlt
     jmp .halt
+
+; ============================================================
+; sam_user_resume(rdi = &saved cpu_frame, rsi = task CR3)
+; Sprint 20: restore a preempted ring-3 task — full register frame,
+; then iretq back to exactly where the timer caught it.
+;
+; cpu_frame_t layout (quad offsets):
+;   r15 r14 r13 r12 r11 r10 r9 r8 rbp rdi rsi rdx rcx rbx rax
+;   vector error rip cs rflags rsp ss
+; ============================================================
+sam_user_resume:
+    mov rcx, rdi                ; frame base
+    mov rax, rsi
+    mov cr3, rax                ; switch into the task address space
+
+    ; Build the iretq frame first (uses rcx as base)
+    push qword [rcx + 168]      ; SS
+    push qword [rcx + 160]      ; RSP
+    push qword [rcx + 152]      ; RFLAGS
+    push qword [rcx + 144]      ; CS
+    push qword [rcx + 136]      ; RIP
+
+    ; Restore GP registers
+    mov r15, [rcx]
+    mov r14, [rcx + 8]
+    mov r13, [rcx + 16]
+    mov r12, [rcx + 24]
+    mov r11, [rcx + 32]
+    mov r10, [rcx + 40]
+    mov r9,  [rcx + 48]
+    mov r8,  [rcx + 56]
+    mov rbp, [rcx + 64]
+    mov rbx, [rcx + 104]
+    mov rax, [rcx + 112]
+    mov rsi, [rcx + 80]
+    mov rdx, [rcx + 88]
+    mov rdi, [rcx + 72]
+    mov rcx, [rcx + 96]         ; last: rcx itself
+    iretq

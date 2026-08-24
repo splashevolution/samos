@@ -47,6 +47,7 @@
 extern void _syscall80(void);
 extern void _user_exit(void);
 extern void _user_halt(void);
+extern void sam_user_resume(const cpu_frame_t *frame, uint64_t cr3);
 
 /* Kernel stack pointer saved by _user_enter, consumed by _user_exit.
  * RBP cannot be listed as an asm clobber (GCC rejects it), so it is
@@ -57,7 +58,24 @@ uint64_t sam_kernel_ret;
 uint64_t sam_kernel_cr3;    /* Sprint 17: boot CR3, restored on resume */
 uint64_t g_task_end_reason; /* TASK_END_* — set before longjmp resume  */
 
-/* setjmp buffer for the task-resume (Sprint 18) */
+/* ── Sprint 20: preemption ────────────────────────────────────────────── */
+#define TASK_END_NONE     0
+#define TASK_END_EXIT     1
+#define TASK_END_FAULT    2
+#define TASK_END_PREEMPT  3
+
+typedef struct {
+    cpu_frame_t frame;      /* full register snapshot at preemption */
+    uint64_t    cr3;        /* task address space                   */
+} sam_tcb_t;
+
+sam_tcb_t g_tcb;                    /* saved context of running task  */
+uint64_t  g_user_cr3      = 0;      /* active task CR3, 0 = none      */
+uint64_t  g_preempt_count = 0;      /* total preemptions              */
+uint64_t  g_tick_count    = 0;      /* PIT ticks since boot           */
+uint64_t  g_quantum       = 0;      /* ticks used in current slice    */
+#define SAM_QUANTUM_TICKS 3         /* ~30 ms slices @ 100 Hz          */
+
 void *g_task_jb[5];
 
 /* ── Enter ring 3 in a fresh address space. Control returns ONLY via
@@ -93,14 +111,26 @@ static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user
 /* ── C-level syscall dispatcher ────────────────────────────────────────── */
 static uint64_t sam_syscall_handler(cpu_frame_t *f);    /* fwd decl */
 
-/* ── Task termination reason, set before resuming the kernel caller ───── */
-#define TASK_END_NONE   0
-#define TASK_END_EXIT   1
-#define TASK_END_FAULT  2
-uint64_t g_task_end_reason;
+/* ── C-level syscall dispatcher ────────────────────────────────────────── */
 
 /* ── Unified interrupt entry: exceptions panic, vector 0x80 = syscall ─── */
 void sam_interrupt_dispatcher(cpu_frame_t *f) {
+    /* Sprint 20: PIT tick — EOI always, preempt ring-3 tasks on quantum */
+    if (f->vector == 32) {
+        outb(0x20, 0x20);           /* EOI to master PIC            */
+        g_tick_count++;
+        if (g_user_cr3 && (f->cs & 3) == 3 &&
+            ++g_quantum >= SAM_QUANTUM_TICKS) {
+            g_quantum = 0;
+            g_preempt_count++;
+            g_tcb.frame = *f;       /* full register snapshot       */
+            g_tcb.cr3   = g_user_cr3;
+            g_task_end_reason = TASK_END_PREEMPT;
+            __builtin_longjmp(g_task_jb, 1);
+        }
+        return;                     /* plain tick: iretq back       */
+    }
+
     if (f->vector == 128) {
         sam_syscall_handler(f);     /* SYS_EXIT resumes the kernel caller */
         return;

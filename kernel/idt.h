@@ -167,6 +167,8 @@ DECL_ISR(16) DECL_ISR(17) DECL_ISR(18) DECL_ISR(19)
 DECL_ISR(20) DECL_ISR(21) DECL_ISR(22) DECL_ISR(23)
 DECL_ISR(24) DECL_ISR(25) DECL_ISR(26) DECL_ISR(27)
 DECL_ISR(28) DECL_ISR(29) DECL_ISR(30) DECL_ISR(31)
+/* Sprint 20: PIT timer (IRQ0 → vector 0x20) preemption handler */
+extern void _irq0(void);
 /* Generic stub for vectors 32-255 (hardware IRQs we don't handle yet) */
 extern void _isr_generic(void);
 /* Sprint 16: int 0x80 syscall gate (DPL=3, callable from ring 3) */
@@ -273,6 +275,8 @@ __asm__ ( \
 "_isr_generic:\n\t" "iretq\n\t" \
 /* Sprint 16: int 0x80 syscall stub — same frame layout as exceptions   */ \
 "_syscall80:\n\t" "push $0\n\t" "push $128\n\t" "jmp _isr_common\n\t" \
+/* Sprint 20: PIT timer IRQ0 (vector 0x20) — full frame for preemption */ \
+"_irq0:\n\t" "push $0\n\t" "push $32\n\t" "jmp _isr_common\n\t" \
 );
 
 /* ── idt_init: install all gates and load the IDT ─────────────────────── */
@@ -298,6 +302,9 @@ static void idt_init(void) {
     /* Hardware IRQ vectors 32-255: point to generic stub (just iretq) */
     for (int i = 32; i < 256; i++)
         idt_set_gate(i, _isr_generic);
+
+    /* Sprint 20: PIT timer preemption handler overrides vector 0x20 */
+    idt_set_gate(0x20, _irq0);
 
     /* Sprint 16: int 0x80 syscall gate — DPL=3 so ring-3 code can raise it */
     idt_set_gate_dpl(0x80, _syscall80, 3);

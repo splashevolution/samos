@@ -31,6 +31,7 @@ static int sam_run_task(const char *name);
 #include "vfs.h"       /* Sprint 16: initrd ustar VFS */
 #include "vmm.h"       /* Sprint 17: per-task address spaces */
 #include "elf.h"       /* Sprint 19: ELF64 loader */
+#include "pit.h"       /* Sprint 20: PIT preemption clock */
 
 /*
  * Define all 32 CPU exception ISR stubs + _isr_common in the .text section.
@@ -305,13 +306,26 @@ static int sam_run_task(const char *name)
     serial_puts("     Entering ring 3...\n");
 
     g_task_end_reason = TASK_END_NONE;
+    g_user_cr3 = user_cr3;
+    g_quantum = 0;
 
     /* Sprint 18: the kernel resumes at the longjmp site when the task
-     * exits (or faults) — CR3 restored below, kernel carries on. */
+     * exits, faults (Sprint 17) or is PREEMPTED by the PIT (Sprint 20). */
     if (__builtin_setjmp(g_task_jb) == 0) {
         sam_user_enter(entry, USER_STACK_TOP, user_cr3);
         __builtin_unreachable();
     }
+
+    /* Sprint 20: a timer quantum expired — put the task straight back
+     * onto the CPU with its full saved register state. The next tick
+     * longjmps here again until the task exits or faults for real. */
+    if (g_task_end_reason == TASK_END_PREEMPT) {
+        serial_puts("     [tick] preempted, resuming task\n");
+        sam_user_resume(&g_tcb.frame, g_tcb.cr3);
+        __builtin_unreachable();
+    }
+
+    g_user_cr3 = 0;   /* task gone: stop timer preemption */
 
     /* Resumed: restore the kernel address space before touching anything
      * else — we may still be running under the (now dead) task's CR3. */
@@ -641,7 +655,9 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     sam_int8_matmul(mA, mBT, mC, MM, MK, MN);
 
     volatile int matmul_ok=1, matmul_wrong=0;
-    for (int i=0;i<MM*MN;i++) { if(mC[i]!=MK){matmul_ok=0;matmul_wrong=i;} }
+    for (int i=0;i<MM*MN;i++) { if(mC[i]!=MK){matmul_ok=0;matmul_wrong=i;
+    }
+    }
 
     serial_puts("     C[0][0]="); serial_putdec((uint64_t)mC[0]);
     serial_puts("  C[0][3]=");   serial_putdec((uint64_t)mC[3]);
@@ -992,12 +1008,14 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     /* 13. Sprint 16 / Phase 4: VFS + initrd + syscalls + first ring-3 process */
 
     vmm_init();
+    pit_init_100hz();      /* Sprint 20: preemption clock @ 100 Hz */
     vga_puts("\n[OK] Sprint 16: VFS + initrd + ring-3 process\n", VGA_GREEN);
     serial_puts("\n[OK] Sprint 16: VFS + initrd + ring-3 process\n");
 
     volatile int sprint16_ok = 0;
     volatile int sprint18_ok = 0;
     volatile int sprint19_ok = 0;
+    volatile int sprint20_ok = 0;
 
     /* Find the initrd module by cmdline prefix "initrd" */
     uint8_t *rd_tag_ptr = (uint8_t *)(uintptr_t)multiboot_info + 8;
@@ -1069,6 +1087,25 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
                 serial_puts("     [WARN] hello task ended unexpectedly: ");
                 serial_putdec((uint64_t)r2); serial_puts("\n");
             }
+
+            /* Sprint 20 proof: loop task runs long enough to be PREEMPTED
+             * by the PIT and resumed with its full register state — it
+             * finishes cleanly as if nothing happened. */
+            serial_puts("\n     --- Task 3: /loop.elf (preemption demo) ---\n");
+            uint64_t pre_before = g_preempt_count;
+            int r3 = sam_run_task("/loop.elf");
+            uint64_t pre_delta = g_preempt_count - pre_before;
+            if (r3 == TASK_END_EXIT && pre_delta > 0) {
+                vga_puts("     [PASS] ring-3 task preempted + resumed\n", VGA_GREEN);
+                serial_puts("     [PASS] Sprint 20: preempted ");
+                serial_putdec(pre_delta);
+                serial_puts(" time(s), task finished cleanly\n");
+                sprint20_ok = 1;
+            } else {
+                serial_puts("     [WARN] loop task: reason=");
+                serial_putdec((uint64_t)r3);
+                serial_puts(" preempts="); serial_putdec(pre_delta); serial_puts("\n");
+            }
         }
     }
 
@@ -1080,7 +1117,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
 
     volatile int sprint9_ok = domains_ok && compute_ok && matmul_ok && bench_ok
                    && gguf_ok && sprint8_domain_ok && stf_ok;
-    volatile int sprint16_gate = sprint9_ok && sprint10_sentinel_ok && sprint16_ok && sprint18_ok && sprint19_ok;
+    volatile int sprint16_gate = sprint9_ok && sprint10_sentinel_ok && sprint16_ok && sprint18_ok && sprint19_ok && sprint20_ok;
 
     if (sprint16_gate) {
         vga_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n",  VGA_GREEN);
@@ -1092,14 +1129,14 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         vga_puts("[SAM OS] STF model     : loaded (format-agnostic)\n",    VGA_GREEN);
         vga_puts("[SAM OS] VFS + initrd  : mounted\n", VGA_GREEN);
         vga_puts("[SAM OS] Ring 3        : first user process ran\n", VGA_GREEN);
-        vga_puts("[SAM OS] Sprint 19 PASS -- VFS + syscalls + isolated ring-3 + ELF loader\n", VGA_GREEN);
+        vga_puts("[SAM OS] Sprint 20 PASS -- preemption + task resume + ELF loader\n", VGA_GREEN);
         serial_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n");
         serial_puts("[SAM OS] Boot wizard   : ");
         serial_puts(g_fb.ready ? "shown  (pixel framebuffer)\n" : "shown  (VGA text wizard)\n");
         serial_puts("[SAM OS] Boot mode     : "); serial_puts(bcfg.mode_name);
         serial_puts("  (dynamic domains)\n");
         serial_puts("[SAM OS] STF model     : loaded (format-agnostic)\n");
-        serial_puts("[SAM OS] Sprint 19 PASS -- VFS + syscalls + isolated ring-3 + ELF loader\n");
+        serial_puts("[SAM OS] Sprint 20 PASS -- preemption + task resume + ELF loader\n");
     } else {
         vga_puts("[SAM OS] Sprint 19 FAIL\n", VGA_RED);
         serial_puts("[SAM OS] Sprint 19 FAIL\n");

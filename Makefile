@@ -84,7 +84,7 @@ $(BUILD)/userasm.o: kernel/userasm.asm | $(BUILD)
 # ── Kernel headers (any change triggers C recompile) ─────────
 KERNEL_HEADERS := kernel/mcp.h kernel/fb.h kernel/boot_config.h \
                   kernel/panic.h kernel/idt.h kernel/syscall.h kernel/vfs.h \
-                  kernel/vmm.h kernel/elf.h kernel/acpi.h kernel/ps2kbd.h \
+                  kernel/vmm.h kernel/elf.h kernel/pit.h kernel/acpi.h kernel/ps2kbd.h \
                   kernel/ata.h kernel/wizard.h kernel/shell.h kernel/simd.h \
                   kernel/scheduler.h kernel/stf.h
 
@@ -108,9 +108,10 @@ $(GGUF_FILE): $(GGUF_TOOL) | $(BUILD)
 $(STF_FILE): $(STF_TOOL) | $(BUILD)
 	python3 $(STF_TOOL) --synthetic --output $(STF_FILE)
 
-# ── Sprint 16-19: initrd (ustar) with SAM OS ELF64 user programs ────
+# ── Sprint 16-20: initrd (ustar) with SAM OS ELF64 user programs ────
 GUARD_ELF := $(BUILD)/guard.elf
 HELLO_ELF := $(BUILD)/hello.elf
+LOOP_ELF  := $(BUILD)/loop.elf
 INITRD    := $(BUILD)/initrd.tar
 
 $(BUILD)/guard.elf: user/guard.asm | $(BUILD)
@@ -123,12 +124,18 @@ $(BUILD)/hello.elf: user/hello.asm | $(BUILD)
 	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
 	    $(BUILD)/hello.o -o $@
 
-$(INITRD): $(GUARD_ELF) $(HELLO_ELF) | $(BUILD)
+$(BUILD)/loop.elf: user/loop.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/loop.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/loop.o -o $@
+
+$(INITRD): $(GUARD_ELF) $(HELLO_ELF) $(LOOP_ELF) | $(BUILD)
 	rm -rf $(BUILD)/initrd
 	mkdir -p $(BUILD)/initrd
 	cp $(GUARD_ELF) $(BUILD)/initrd/guard.elf
 	cp $(HELLO_ELF) $(BUILD)/initrd/hello.elf
-	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf
+	cp $(LOOP_ELF)  $(BUILD)/initrd/loop.elf
+	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf loop.elf
 
 $(ISO): $(KERNEL) $(GGUF_FILE) $(STF_FILE) $(INITRD) | $(GRUB_DIR)
 	cp $(KERNEL)    $(BOOT_DIR)/$(TARGET).elf
@@ -213,7 +220,7 @@ test: iso-ci
 	for marker in \
 	    "dot\(\[1\.\.32\]" \
 	    "\[PASS\]" \
-	    "Sprint 19 PASS"; \
+	    "Sprint 20 PASS"; \
 	do \
 	    if grep -qE "$$marker" $(SERIAL_LOG) 2>/dev/null; then \
 	        echo "  [OK]  $$marker"; \

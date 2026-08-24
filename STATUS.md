@@ -483,6 +483,33 @@ full panic screen (VGA text + pixel framebuffer overlay + serial) and halts clea
 
 ---
 
+
+### Sprint 20 - Phase 4: PIT Preemption + Transparent Task Resume  Done
+**Date**: 2026-08-24
+**Goal**: The timer, not the task, decides when it runs.
+
+**How it works**:
+- kernel/pit.h: 8254 channel 0 at 100 Hz; IRQ0 unmasked at the master PIC.
+- _irq0 full-frame stub at vector 0x20: EOI + tick count; when a ring-3 task
+  has consumed its quantum (3 ticks ~ 30 ms) the complete register frame is
+  snapshotted into a TCB and the kernel longjmps home.
+- sam_user_resume(frame, cr3) rebuilds the iretq frame and puts the task
+  straight back on the CPU - mid-instruction, registers intact.
+- The task cannot tell it was preempted: /loop.elf was interrupted twice and
+  still printed every iteration and exited cleanly.
+
+**Boot evidence**:
+[tick] preempted, resuming task
+[tick] preempted, resuming task
+[PASS] Sprint 20: preempted 2 time(s), task finished cleanly
+[SAM OS] Sprint 20 PASS -- preemption + task resume + ELF loader
+
+**Honest scope**: one runnable task at a time (preemption returns it to the
+same kernel await-point; no second task to switch TO yet). Round-robin between
+MULTIPLE resident tasks is the natural Sprint 21.
+
+---
+
 ### Sprint 16 — Phase 4: VFS + initrd + Syscalls + First Ring-3 Process  ✅
 **Date**: 2026-08-23
 **Goal**: Run a second piece of code that is not the kernel — the app model exists.
@@ -594,7 +621,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 | 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
 | 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
 | 3 — Hardware | ACPI, PS/2 IRQ keyboard, ATA PIO disk | ✅ Done (Sprint 15); full PCI scan + USB HID remain |
-| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 In progress; Sprints 16–19 done (VFS, syscalls, CR3 isolation, task switch, ELF loader, shell `run`). Next: preemption, multi-task scheduler, argv |
+| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 In progress; Sprints 16–19 done (VFS, syscalls, CR3 isolation, task switch, ELF loader, shell `run`). Next: multi-task round-robin, argv |
 | 5 — Inference | Real model end-to-end on bare metal | Future |
 | 6 — Compatibility | SAM ABI → Lua → WASM → Linux compat | Far future |
 
