@@ -261,6 +261,7 @@ static void cmd_help(sam_shell_t *sh) {
     sh_puts(sh,   "  mem     -- memory domain layout\n",   SH_CYAN);
     sh_puts(sh,   "  mode    -- current boot mode\n",      SH_CYAN);
     sh_puts(sh,   "  res     -- hardware resource summary\n", SH_CYAN);
+    sh_puts(sh,   "  run <n> -- run ELF program from initrd (Sprint 19)\n", SH_CYAN);
     sh_puts(sh,   "  setup   -- re-run configuration wizard\n", SH_CYAN);
     sh_puts(sh,   "  clear   -- clear screen\n",           SH_CYAN);
     sh_puts(sh,   "  reboot  -- system reset\n",           SH_CYAN);
@@ -364,6 +365,28 @@ static void cmd_unknown(sam_shell_t *sh, const char *cmd) {
     sh_puts(sh, "  (type 'help')\n", SH_GREY);
 }
 
+/* Sprint 19: `run <name>` — load an ELF from the initrd and run it in
+ * ring 3 (own address space). The kernel resumes when the task exits
+ * or faults. sam_run_task() is provided by main.c. */
+static int sam_run_task(const char *name);
+
+static void cmd_run(sam_shell_t *sh, const char *args) {
+    /* trim leading spaces */
+    while (*args == ' ') args++;
+    if (!*args) {
+        sh_puts(sh, "\n  Usage: run <name>   (e.g. run hello.elf)\n", SH_YELLOW);
+        return;
+    }
+    sh_puts(sh, "\n  [run] starting ", SH_CYAN);
+    sh_puts(sh, args, SH_CYAN);
+    sh_puts(sh, "\n", SH_CYAN);
+
+    int r = sam_run_task(args);
+    if (r == TASK_END_EXIT)       sh_puts(sh, "  [run] task exited cleanly\n", SH_GREEN);
+    else if (r == TASK_END_FAULT) sh_puts(sh, "  [run] task faulted (isolation held)\n", SH_YELLOW);
+    else                          sh_puts(sh, "  [run] task failed to start\n", SH_RED);
+}
+
 /* ── Eval ─────────────────────────────────────────────────────────────────── */
 static void sh_eval(sam_shell_t *sh, const sam_mcp_t *mcp,
                     const sam_boot_config_t *bcfg)
@@ -371,6 +394,19 @@ static void sh_eval(sam_shell_t *sh, const sam_mcp_t *mcp,
     int start = 0;
     while (sh->cmd[start] == ' ') start++;
     const char *cmd = &sh->cmd[start];
+
+    /* Sprint 19: "run <name>" prefix command */
+    if (cmd[0]=='r' && cmd[1]=='u' && cmd[2]=='n' &&
+        (cmd[3]==' ' || cmd[3]=='\0')) {
+        cmd_run(sh, &cmd[3]);
+        /* save to history */
+        if (sh->hist_count < SH_HIST_MAX) {
+            for (int i = 0; i <= sh->cmd_len; i++)
+                sh->hist[sh->hist_count][i] = sh->cmd[i];
+            sh->hist_count++;
+        }
+        return;
+    }
 
     if (sh_strlen(cmd) == 0)              { /* empty */ }
     else if (!sh_strcmp(cmd, "help"))   cmd_help(sh);

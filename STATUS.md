@@ -545,6 +545,46 @@ the PSL `user_cannot_store` invariant now has a hardware enforcement point.
 
 ---
 
+### Sprint 18 — Phase 4: Task Switching (Kernel Resumes After Exit)  ✅
+**Date**: 2026-08-24
+**Goal**: The kernel SURVIVES its tasks. Exit/fault resumes the caller instead
+of halting — the prerequisite for a shell that can run programs.
+
+**How it works**:
+- `__builtin_setjmp` in the task runner; the exit syscall and ring-3 fault
+  paths record a reason (`TASK_END_EXIT` / `TASK_END_FAULT`) and
+  `__builtin_longjmp` back into the kernel.
+- Resumed branch restores the kernel CR3 before anything else.
+- Two initrd programs prove both paths: `/guard.bin` faults by design
+  (isolation held), `/hello.bin` exits cleanly (task switch worked).
+
+**Debug war story (kept for posterity)**: resume initially landed in random
+code because GCC proved `sam_user_enter` never returned (unreachable hlt tail)
+and merged arbitrary blocks at the resume address; fixing that exposed a
+returns-twice clobber of non-volatile locals. Both are classic setjmp pitfalls,
+now documented here.
+
+---
+
+### Sprint 19 — Phase 4: ELF64 Loader + Shell `run` Command  ✅
+**Date**: 2026-08-24
+**Goal**: Real executables, runnable from the shell.
+
+**Files added / modified**:
+| File | Purpose |
+|------|---------|
+| `kernel/elf.h` | Minimal ELF64 loader: ET_EXEC/x86-64/PT_LOAD only; every segment must land inside the user region or it is rejected |
+| `user/linker.ld` | User programs link at 0x19000000 (single LOAD via `-z noseparate-code`) |
+| `user/hello.asm`, `user/guard.asm` | Rebuilt as real ELF64 binaries |
+| `kernel/shell.h` | New command: `run <name>` — runs an initrd ELF in ring 3, kernel resumes after |
+| `Makefile` | ELF build rules; CI marker `Sprint 19 PASS` |
+
+**Honest scope**: static flat-memory ELFs (no dynamic linking/PIE), single task
+at a time, no argv yet, no per-task scheduling (cooperative, one shot). Next:
+preemption via PIT, multiple resident tasks, argv + exit codes surfaced to shell.
+
+---
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
@@ -554,7 +594,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 | 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
 | 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
 | 3 — Hardware | ACPI, PS/2 IRQ keyboard, ATA PIO disk | ✅ Done (Sprint 15); full PCI scan + USB HID remain |
-| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 In progress; Sprint 16 (VFS+syscalls+ring3) + Sprint 17 (per-task CR3 isolation) done. Next: task switching, ELF loader |
+| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 In progress; Sprints 16–19 done (VFS, syscalls, CR3 isolation, task switch, ELF loader, shell `run`). Next: preemption, multi-task scheduler, argv |
 | 5 — Inference | Real model end-to-end on bare metal | Future |
 | 6 — Compatibility | SAM ABI → Lua → WASM → Linux compat | Far future |
 

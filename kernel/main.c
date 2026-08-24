@@ -18,9 +18,19 @@
 #include "ps2kbd.h"     /* ps2kbd_init(), ps2_wait_char(), IDT_DEFINE_KBD_STUB() */
 #include "ata.h"        /* ata_init(), ata_read_sectors(), sam_ata_t */
 #include "wizard.h"
+/* Sprint 19: shell `run` support — defined below, declared here so the
+ * shell (included above) can dispatch the "run" command to it. */
+static int sam_run_task(const char *name);
+
+/* task end reasons (shared with syscall.h) */
+#define TASK_END_NONE   0
+#define TASK_END_EXIT   1
+#define TASK_END_FAULT  2
+
 #include "shell.h"
 #include "vfs.h"       /* Sprint 16: initrd ustar VFS */
 #include "vmm.h"       /* Sprint 17: per-task address spaces */
+#include "elf.h"       /* Sprint 19: ELF64 loader */
 
 /*
  * Define all 32 CPU exception ISR stubs + _isr_common in the .text section.
@@ -247,6 +257,69 @@ static void print_banner(void) {
     vga_puts("  Proof-Native Kernel  |  Sprint 16  |  2026\n",                VGA_WHITE);
     vga_puts("============================================================\n", VGA_CYAN);
     vga_puts("\n", VGA_WHITE);
+}
+
+/* ============================================================================
+ * Sprint 18/19: run one user task from the initrd, end to end.
+ * Loads /<name> via VFS, copies it to USER_CODE_BASE, builds a fresh
+ * address space, enters ring 3 and RESUMES here when the task exits or
+ * faults. Returns the task end reason (TASK_END_*).
+ * ========================================================================== */
+static int sam_run_task(const char *name)
+{
+    vfs_file_handle_t h;
+    if (vfs_open(name, &h) != 0) {
+        serial_puts("     [FAIL] "); serial_puts(name); serial_puts(" not found in initrd\n");
+        return -1;
+    }
+
+    /* Stage the image in kernel space first (GENERAL domain scratch). */
+    uint8_t *stage = (uint8_t *)(uintptr_t)(GENERAL_DOMAIN_BASE + 0x00100000UL);
+    int32_t got = vfs_read(&h, stage, 0x00100000u);
+    vfs_close(&h);
+    if (got <= 0) {
+        serial_puts("     [FAIL] vfs_read returned "); serial_putdec((uint64_t)got); serial_puts("\n");
+        return -1;
+    }
+    serial_puts("     [OK] "); serial_puts(name);
+    serial_puts(" staged ("); serial_putdec((uint64_t)got); serial_puts(" bytes)\n");
+
+    /* Sprint 19: load as ELF64 (validates + copies segments + zeroes BSS) */
+    uint64_t entry = 0;
+    int er = elf_load(stage, (uint32_t)got, &entry);
+    if (er != 0) {
+        serial_puts("     [FAIL] elf_load error: "); serial_putdec((uint64_t)(-er)); serial_puts("\n");
+        return -1;
+    }
+    serial_puts("     [OK] Sprint 19: ELF64 loaded, entry=");
+    serial_puthex(entry); serial_puts("\n");
+
+    /* Fresh address space: only the user region is ring-3 accessible. */
+    uint64_t user_cr3 = vmm_create_user_as();
+    if (!user_cr3) {
+        serial_puts("     [FAIL] vmm_create_user_as: out of page-table pages\n");
+        return -1;
+    }
+
+    serial_puts("     [OK] Sprint 17: user address space built\n");
+    serial_puts("     Entering ring 3...\n");
+
+    g_task_end_reason = TASK_END_NONE;
+
+    /* Sprint 18: the kernel resumes at the longjmp site when the task
+     * exits (or faults) — CR3 restored below, kernel carries on. */
+    if (__builtin_setjmp(g_task_jb) == 0) {
+        sam_user_enter(entry, USER_STACK_TOP, user_cr3);
+        __builtin_unreachable();
+    }
+
+    /* Resumed: restore the kernel address space before touching anything
+     * else — we may still be running under the (now dead) task's CR3. */
+    {
+        uint64_t kcr3 = sam_kernel_cr3;
+        __asm__ volatile ("movq %0, %%cr3" :: "r"(kcr3));
+    }
+    return (int)g_task_end_reason;
 }
 
 /* ============================================================================
@@ -567,7 +640,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     for (int i=0;i<MN*MK;i++) mBT[i]=1;
     sam_int8_matmul(mA, mBT, mC, MM, MK, MN);
 
-    int matmul_ok=1, matmul_wrong=0;
+    volatile int matmul_ok=1, matmul_wrong=0;
     for (int i=0;i<MM*MN;i++) { if(mC[i]!=MK){matmul_ok=0;matmul_wrong=i;} }
 
     serial_puts("     C[0][0]="); serial_putdec((uint64_t)mC[0]);
@@ -655,7 +728,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     vga_puts("\n[OK] Sprint 6: GGUF header parse\n", VGA_GREEN);
     serial_puts("\n[OK] Sprint 6: GGUF header parse\n");
 
-    int gguf_ok = 0;
+    volatile int gguf_ok = 0;
     uint8_t *mb2     = (uint8_t *)(uintptr_t)multiboot_info;
     uint8_t *tag_ptr = mb2 + 8;
     mb2_module_tag_t *mod_tag = 0;
@@ -775,7 +848,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     vga_puts("\n[OK] Sprint 9: SAM Tensor Format (STF) model loader\n", VGA_GREEN);
     serial_puts("\n[OK] Sprint 9: SAM Tensor Format (STF) model loader\n");
 
-    int stf_ok = 0;
+    volatile int stf_ok = 0;
     /* Find the STF module by walking MB2 tags (cmdline = "stf_model") */
     uint8_t *stf_tag_ptr = (uint8_t *)(uintptr_t)multiboot_info + 8;
     mb2_module_tag_t *stf_mod = 0;
@@ -914,7 +987,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     serial_puts(mcp.gpu_class == MCP_GPU_INTEGRATED ? "Integrated\n" :
                 mcp.gpu_class == MCP_GPU_DISCRETE    ? "Discrete\n"   : "None/Unknown\n");
 
-    int sprint10_sentinel_ok = s10_ai_ok && s10_gm_ok && s10_gn_ok;
+    volatile int sprint10_sentinel_ok = s10_ai_ok && s10_gm_ok && s10_gn_ok;
 
     /* 13. Sprint 16 / Phase 4: VFS + initrd + syscalls + first ring-3 process */
 
@@ -922,7 +995,9 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     vga_puts("\n[OK] Sprint 16: VFS + initrd + ring-3 process\n", VGA_GREEN);
     serial_puts("\n[OK] Sprint 16: VFS + initrd + ring-3 process\n");
 
-    int sprint16_ok = 0;
+    volatile int sprint16_ok = 0;
+    volatile int sprint18_ok = 0;
+    volatile int sprint19_ok = 0;
 
     /* Find the initrd module by cmdline prefix "initrd" */
     uint8_t *rd_tag_ptr = (uint8_t *)(uintptr_t)multiboot_info + 8;
@@ -966,46 +1041,33 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
                 serial_puts("  ("); serial_putdec(vfs_files[fi].size); serial_puts(" bytes)\n");
             }
 
-            vfs_file_handle_t h;
-            if (vfs_open("/hello.bin", &h) != 0) {
-                serial_puts("     [FAIL] /hello.bin not found in initrd\n");
-                vga_puts("     [FAIL] /hello.bin missing\n", VGA_RED);
+            sprint16_ok = 1;
+
+            /* Sprint 17 proof: guard task reads kernel memory -> #PF ->
+             * kernel resumes with reason FAULT. */
+            serial_puts("\n     --- Task 1: /guard.elf (isolation probe) ---\n");
+            int r1 = sam_run_task("/guard.elf");
+            if (r1 == TASK_END_FAULT) {
+                serial_puts("     [PASS] Sprint 17: kernel memory isolated from ring 3\n");
+                vga_puts("     [PASS] ring-3 isolation enforced (#PF)\n", VGA_GREEN);
             } else {
-                /* Copy user program to USER_CODE_BASE and enter ring 3.
-                 * Returns only when the task calls exit(2). */
-                uint8_t *udst = (uint8_t *)(uintptr_t)USER_CODE_BASE;
-                int32_t got = vfs_read(&h, udst, 0x00100000u);
-                vfs_close(&h);
+                serial_puts("     [WARN] guard task ended unexpectedly: ");
+                serial_putdec((uint64_t)r1); serial_puts("\n");
+            }
 
-                if (got <= 0) {
-                    serial_puts("     [FAIL] vfs_read(/hello.bin) returned "); serial_putdec((uint64_t)got); serial_puts("\n");
-                    vga_puts("     [FAIL] user program read\n", VGA_RED);
-                } else {
-                    serial_puts("     hello.bin loaded at 0x19000000 (");
-                    serial_putdec((uint64_t)got); serial_puts(" bytes)\n");
-
-                    /* Everything up to here is verified. The exit syscall
-                     * verifies the ring-3 return leg and halts cleanly
-                     * (Sprint 16 is single-task), so this line marks the
-                     * pass criteria for the user-mode leg. */
-                    sprint16_ok = 1;
-                    vga_puts("     [PASS] ring-3 process ran + exited via syscall\n", VGA_GREEN);
-                    serial_puts("     Entering ring 3...\n");
-
-                    /* Sprint 17: fresh address space — only the user region
-                     * is ring-3 accessible; kernel memory is supervisor-only. */
-                    uint64_t user_cr3 = vmm_create_user_as();
-                    if (!user_cr3) {
-                        serial_puts("     [FAIL] vmm_create_user_as: out of page-table pages\n");
-                        vga_puts("     [FAIL] VMM alloc\n", VGA_RED);
-                    } else {
-                        serial_puts("     [OK] Sprint 17: user address space built\n");
-                        sam_user_enter(USER_CODE_BASE, USER_STACK_TOP, user_cr3);
-                    }
-
-                    /* Not reached in Sprint 16: exit halts. Resume-to-shell
-                     * arrives with real task switching (Phase 4 continues). */
-                }
+            /* Sprint 18 proof: hello task exits cleanly -> kernel RESUMES
+             * and keeps running (task switch works end to end). */
+            serial_puts("\n     --- Task 2: /hello.elf (clean exit + resume) ---\n");
+            int r2 = sam_run_task("/hello.elf");
+            if (r2 == TASK_END_EXIT) {
+                vga_puts("     [PASS] ring-3 process ran + exited via syscall\n", VGA_GREEN);
+                serial_puts("     [PASS] Sprint 18: kernel resumed after task exit\n");
+                serial_puts("     [PASS] Sprint 19: ELF64 task executed via loader\n");
+                sprint18_ok = 1;
+                sprint19_ok = 1;
+            } else {
+                serial_puts("     [WARN] hello task ended unexpectedly: ");
+                serial_putdec((uint64_t)r2); serial_puts("\n");
             }
         }
     }
@@ -1016,9 +1078,9 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     vga_puts("============================================================\n", VGA_CYAN);
     serial_puts("\n============================================================\n");
 
-    int sprint9_ok = domains_ok && compute_ok && matmul_ok && bench_ok
+    volatile int sprint9_ok = domains_ok && compute_ok && matmul_ok && bench_ok
                    && gguf_ok && sprint8_domain_ok && stf_ok;
-    int sprint16_gate = sprint9_ok && sprint10_sentinel_ok && sprint16_ok;
+    volatile int sprint16_gate = sprint9_ok && sprint10_sentinel_ok && sprint16_ok && sprint18_ok && sprint19_ok;
 
     if (sprint16_gate) {
         vga_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n",  VGA_GREEN);
@@ -1030,17 +1092,17 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         vga_puts("[SAM OS] STF model     : loaded (format-agnostic)\n",    VGA_GREEN);
         vga_puts("[SAM OS] VFS + initrd  : mounted\n", VGA_GREEN);
         vga_puts("[SAM OS] Ring 3        : first user process ran\n", VGA_GREEN);
-        vga_puts("[SAM OS] Sprint 16 PASS -- VFS + initrd + syscalls + ring-3 process\n", VGA_GREEN);
+        vga_puts("[SAM OS] Sprint 19 PASS -- VFS + syscalls + isolated ring-3 + ELF loader\n", VGA_GREEN);
         serial_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n");
         serial_puts("[SAM OS] Boot wizard   : ");
         serial_puts(g_fb.ready ? "shown  (pixel framebuffer)\n" : "shown  (VGA text wizard)\n");
         serial_puts("[SAM OS] Boot mode     : "); serial_puts(bcfg.mode_name);
         serial_puts("  (dynamic domains)\n");
         serial_puts("[SAM OS] STF model     : loaded (format-agnostic)\n");
-        serial_puts("[SAM OS] Sprint 16 PASS -- VFS + initrd + syscalls + ring-3 process\n");
+        serial_puts("[SAM OS] Sprint 19 PASS -- VFS + syscalls + isolated ring-3 + ELF loader\n");
     } else {
-        vga_puts("[SAM OS] Sprint 16 FAIL\n", VGA_RED);
-        serial_puts("[SAM OS] Sprint 16 FAIL\n");
+        vga_puts("[SAM OS] Sprint 19 FAIL\n", VGA_RED);
+        serial_puts("[SAM OS] Sprint 19 FAIL\n");
     }
 
     vga_puts("============================================================\n", VGA_CYAN);

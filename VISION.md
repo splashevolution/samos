@@ -64,3 +64,33 @@ including Indian public institutions, without permission from any foreign vendor
   formally reasoned about (PSL), and reproducible from source by any citizen.
 
 See [ROADMAP.md](ROADMAP.md) for how we get there, phase by phase.
+
+## Honest Maturity: Are We a Laptop/Desktop/Mobile/Server OS Yet?
+
+**No.** SAM OS is a research prototype at Phase 4 of its own 6-phase roadmap —
+roughly the scope of an early-1990s hobby Unix, deliberately built in the open
+about what it cannot do. This table is kept up to date as sprints land.
+
+| Platform tier | What it demands | SAM OS today |
+|---|---|---|
+| **Laptop/Desktop** | Multi-core SMP scheduling, USB HID + NVMe/AHCI storage, GPU drivers, power management, writable filesystem, network stack, GUI | ✅ Boots on x86-64 hardware/VMs · ⚠️ single-core cooperative scheduler, read-only initrd, ATA-PIO read-only, no network, no PM |
+| **Server** | All of the above + SMP at scale, virtualization/IOMMU, journaling filesystems, remote management, security hardening | ❌ Years away |
+| **Tablet** | ARM64 port, touch input, battery/power, wireless stack, app sandboxing | ❌ Wrong architecture — x86-64 only today |
+| **Mobile phone** | Everything above + modem/RIL, cellular certification, secure boot chains, vendor BSPs | ❌ Decade-scale effort even for funded teams |
+
+**What exists today (real, verified per-sprint):** multiboot2 boot to 64-bit long
+mode, IDT + panic screen, ACPI/PS-2/ATA drivers, PCI scan, framebuffer GUI +
+OOBE wizard, kernel shell, INT8 SIMD compute engine, STF tensor loader,
+VFS over initrd, `int 0x80` syscall ABI, ring 3 **with hardware-enforced memory
+isolation** (per-task CR3, Sprint 17).
+
+**The realistic ladder to "laptop OS" (in order, no skipping):**
+1. Task switching + preemption (Sprints 18–19)
+2. Writable filesystem; full storage drivers (ATA write → AHCI → NVMe)
+3. SMP: application-processor startup, per-CPU scheduler queues
+4. Real userland: ELF loader, minimal libc, shell as a normal process
+5. Network stack (NIC driver → TCP/IP)
+6. GUI beyond the framebuffer
+
+This honesty is the project's policy: every claim traces to a boot log or test
+marker ([STATUS.md](STATUS.md)), and anything not yet true is listed as not yet true.

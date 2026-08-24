@@ -63,6 +63,9 @@ _user_exit:
     pop r12
     pop rbx
     popfq
+    ; Consume the return-address slot pushed by the original `call`
+    ; sam_user_enter — we re-enter mid-function via jmp, not via ret.
+    add rsp, 8
     jmp [rel sam_kernel_ret]
 
 _user_halt:

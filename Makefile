@@ -84,8 +84,8 @@ $(BUILD)/userasm.o: kernel/userasm.asm | $(BUILD)
 # ── Kernel headers (any change triggers C recompile) ─────────
 KERNEL_HEADERS := kernel/mcp.h kernel/fb.h kernel/boot_config.h \
                   kernel/panic.h kernel/idt.h kernel/syscall.h kernel/vfs.h \
-                  kernel/vmm.h kernel/acpi.h kernel/ps2kbd.h kernel/ata.h \
-                  kernel/wizard.h kernel/shell.h kernel/simd.h \
+                  kernel/vmm.h kernel/elf.h kernel/acpi.h kernel/ps2kbd.h \
+                  kernel/ata.h kernel/wizard.h kernel/shell.h kernel/simd.h \
                   kernel/scheduler.h kernel/stf.h
 
 # ── Compile C ────────────────────────────────────────────────
@@ -108,19 +108,27 @@ $(GGUF_FILE): $(GGUF_TOOL) | $(BUILD)
 $(STF_FILE): $(STF_TOOL) | $(BUILD)
 	python3 $(STF_TOOL) --synthetic --output $(STF_FILE)
 
-# ── Sprint 16: initrd (ustar) with the first SAM OS user program ─────
-USER_CODE := user/hello.asm
-HELLO_BIN := $(BUILD)/hello.bin
+# ── Sprint 16-19: initrd (ustar) with SAM OS ELF64 user programs ────
+GUARD_ELF := $(BUILD)/guard.elf
+HELLO_ELF := $(BUILD)/hello.elf
 INITRD    := $(BUILD)/initrd.tar
 
-$(HELLO_BIN): $(USER_CODE) | $(BUILD)
-	nasm -f bin -o $@ $<
+$(BUILD)/guard.elf: user/guard.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/guard.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/guard.o -o $@
 
-$(INITRD): $(HELLO_BIN) | $(BUILD)
+$(BUILD)/hello.elf: user/hello.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/hello.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/hello.o -o $@
+
+$(INITRD): $(GUARD_ELF) $(HELLO_ELF) | $(BUILD)
 	rm -rf $(BUILD)/initrd
 	mkdir -p $(BUILD)/initrd
-	cp $(HELLO_BIN) $(BUILD)/initrd/hello.bin
-	tar --format=ustar -cf $@ -C $(BUILD)/initrd hello.bin
+	cp $(GUARD_ELF) $(BUILD)/initrd/guard.elf
+	cp $(HELLO_ELF) $(BUILD)/initrd/hello.elf
+	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf
 
 $(ISO): $(KERNEL) $(GGUF_FILE) $(STF_FILE) $(INITRD) | $(GRUB_DIR)
 	cp $(KERNEL)    $(BOOT_DIR)/$(TARGET).elf
@@ -205,7 +213,7 @@ test: iso-ci
 	for marker in \
 	    "dot\(\[1\.\.32\]" \
 	    "\[PASS\]" \
-	    "Sprint 17 PASS"; \
+	    "Sprint 19 PASS"; \
 	do \
 	    if grep -qE "$$marker" $(SERIAL_LOG) 2>/dev/null; then \
 	        echo "  [OK]  $$marker"; \

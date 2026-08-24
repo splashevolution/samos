@@ -54,63 +54,66 @@ extern void _user_halt(void);
 extern uint64_t sam_kernel_rsp;
 uint64_t sam_kernel_rbp;
 uint64_t sam_kernel_ret;
-uint64_t sam_kernel_cr3;    /* Sprint 17: boot CR3, restored on halt */
+uint64_t sam_kernel_cr3;    /* Sprint 17: boot CR3, restored on resume */
+uint64_t g_task_end_reason; /* TASK_END_* — set before longjmp resume  */
 
-/* ── Enter ring 3 (never returns normally; exits via _user_exit) ─────── */
-/* MUST NOT be inlined: _user_exit resumes into this function's caller. */
+/* setjmp buffer for the task-resume (Sprint 18) */
+void *g_task_jb[5];
+
+/* ── Enter ring 3 in a fresh address space. Control returns ONLY via
+ * __builtin_longjmp (exit syscall or ring-3 fault) into the setjmp site
+ * in sam_run_task(), which restores the kernel CR3. ───────────────────── */
 static void __attribute__((noinline)) sam_user_enter(uint64_t rip, uint64_t user_rsp,
                                                      uint64_t user_cr3) {
-    /* Capture the true return address so _user_exit can jmp back without
-     * trusting the kernel stack (which is trampled while user code runs). */
-    sam_kernel_ret = (uint64_t)__builtin_return_address(0);
     __asm__ volatile (
         "movq %%cr3, %%rax\n\t"     /* save kernel CR3               */
-        "movq %%rax, %2\n\t"
-        "movq %3, %%rax\n\t"
+        "movq %%rax, %0\n\t"
+        "movq %1, %%rax\n\t"
         "movq %%rax, %%cr3\n\t"     /* switch to task address space  */
-        "cli\n\t"
         "pushfq\n\t"
-        "movq %%rbp, %1\n\t"
         "push %%rbx\n\t"
         "push %%r12\n\t"
         "push %%r13\n\t"
         "push %%r14\n\t"
         "push %%r15\n\t"
-        "movq %%rsp, %0\n\t"
-        /* Build the interrupt frame for iretq to ring 3 */
-        "push %q5\n\t"          /* SS   = user data  */
-        "push %4\n\t"           /* RSP  = user stack */
+        "push %q2\n\t"          /* SS   = user data  */
+        "push %3\n\t"           /* RSP  = user stack */
         "push $0x202\n\t"       /* RFLAGS: IF=1, reserved bit 1 */
-        "push %q6\n\t"          /* CS   = user code  */
-        "push %7\n\t"           /* RIP  = entry      */
+        "push %q4\n\t"          /* CS   = user code  */
+        "push %5\n\t"           /* RIP  = entry      */
         "iretq\n\t"
-        : "=m"(sam_kernel_rsp), "=m"(sam_kernel_rbp), "=m"(sam_kernel_cr3)
-        : "r"(user_cr3), "r"(user_rsp), "r"((uint64_t)SEL_USER_DATA),
-          "r"((uint64_t)SEL_USER_CODE), "r"(rip)
-        : "rax", "rbx", "r12", "r13", "r14", "r15", "cc"
+        :
+        : "m"(sam_kernel_cr3), "r"(user_cr3), "r"((uint64_t)SEL_USER_DATA),
+          "r"(user_rsp), "r"((uint64_t)SEL_USER_CODE), "r"(rip)
+        : "rax", "rbx", "r12", "r13", "r14", "r15", "cc", "memory"
     );
-    /* Not reached when the task exits cleanly. If it somehow falls through,
-     * halt here rather than corrupt kernel state. */
-    for (;;) __asm__ volatile ("hlt");
+    __builtin_unreachable();    /* control resumes via longjmp */
 }
 
 /* ── C-level syscall dispatcher ────────────────────────────────────────── */
 static uint64_t sam_syscall_handler(cpu_frame_t *f);    /* fwd decl */
 
+/* ── Task termination reason, set before resuming the kernel caller ───── */
+#define TASK_END_NONE   0
+#define TASK_END_EXIT   1
+#define TASK_END_FAULT  2
+uint64_t g_task_end_reason;
+
 /* ── Unified interrupt entry: exceptions panic, vector 0x80 = syscall ─── */
 void sam_interrupt_dispatcher(cpu_frame_t *f) {
     if (f->vector == 128) {
-        sam_syscall_handler(f);     /* SYS_EXIT never returns from here */
+        sam_syscall_handler(f);     /* SYS_EXIT resumes the kernel caller */
         return;
     }
 
-    /* Sprint 17: a page fault raised FROM RING 3 is the isolation test
-     * passing, not a kernel bug. Report and halt cleanly. */
+    /* Sprint 17/18: a page fault raised FROM RING 3 means the task touched
+     * memory it must not. With per-task CR3 this is isolation WORKING.
+     * Record the reason and resume the kernel via longjmp. */
     if (f->vector == 14 && (f->cs & 3) == 3) {
-        serial_puts("[OK] Sprint 17: ring-3 access to kernel memory faulted (#PF)\n");
-        serial_puts("     fault addr : "); serial_puthex(f->rip); serial_puts("\n");
-        serial_puts("[SAM OS] Sprint 17 PASS -- per-task page tables isolate ring 3\n");
-        _user_halt();
+        serial_puts("[OK] ring-3 access violation faulted (#PF) at ");
+        serial_puthex(f->rip); serial_puts("\n");
+        g_task_end_reason = TASK_END_FAULT;
+        __builtin_longjmp(g_task_jb, 1);
         /* not reached */
     }
 
@@ -137,17 +140,11 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
     }
 
     case SAM_SYS_EXIT:
-        /* Task finished. The return leg of the excursion is verified by
-         * simply being HERE (ring 0, via the int 0x80 gate + TSS stack).
-         * Sprint 16 scope: single task — exit halts the kernel cleanly.
-         * Resume-to-shell arrives with real task switching. */
-        serial_puts("[OK] Sprint 16: ring-3 task exited cleanly\n");
-        /* All Sprint 16 pass criteria are now verified: boot checks passed
-         * (else we'd never have entered), ring 3 executed, and the int 0x80
-         * gate + TSS stack switch returned us to ring 0. Print the final
-         * banner here because single-task exit halts below. */
-        serial_puts("[SAM OS] Sprint 16 PASS -- VFS + initrd + syscalls + ring-3 process\n");
-        _user_halt();
+        /* Sprint 18: exit RESUMES the kernel via longjmp — CR3 is restored
+         * in the resumed branch; the task is gone, the kernel carries on. */
+        serial_puts("[OK] ring-3 task exited cleanly\n");
+        g_task_end_reason = TASK_END_EXIT;
+        __builtin_longjmp(g_task_jb, 1);
         /* not reached */
         for (;;) __asm__ volatile ("hlt");
 

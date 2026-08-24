@@ -6,7 +6,7 @@ A bare-metal x86-64 research kernel exploring CPU-only AI inference and retro ga
 
 > **Why?** Millions of capable machines are abandoned by vendor-locked update cycles while AI demand inflates hardware prices. SAM OS revives them as sovereign, on-device AI appliances. See [VISION.md](VISION.md) — including the Make-in-India alignment.
 
-> **Status: Research prototype, Sprint 15.** Boot → graphical OOBE wizard → interactive kernel shell. What works today is real. What comes next is clearly labelled.
+> **Status: Research prototype, Sprint 19.** Boot → graphical OOBE wizard → interactive kernel shell. What works today is real. What comes next is clearly labelled.
 
 ---
 
@@ -18,7 +18,7 @@ A Core i5 with SSE4.2 can do meaningful INT8 matrix math in bare-metal mode. Nob
 
 ---
 
-## What Exists Today (Sprint 16)
+## What Exists Today (Sprint 19)
 
 - **Multiboot2 boot** — GRUB2 → 64-bit long mode, identity-mapped 4 GiB, SSE/FPU initialised
 - **Graphical OOBE wizard** — 1024×768 pixel GUI (Bochs VBE direct I/O), dark sidebar, hostname/WiFi setup
@@ -28,7 +28,7 @@ A Core i5 with SSE4.2 can do meaningful INT8 matrix math in bare-metal mode. Nob
 - **Kernel safety** — all 32 CPU exception handlers, panic screen, E820 memory-map validation (Sprint 14)
 - **Real hardware** — ACPI table parsing, IRQ-driven PS/2 keyboard, ATA PIO disk read (Sprint 15)
 - **Kernel shell** — PS/2 keyboard, `help`, `info`, `setup` commands
-- **First user process** — initrd (ustar) VFS, `int 0x80` syscall gate (`write`/`exit`/`read`), ring-3 hello world (Sprint 16)
+- **First user processes** — initrd (ustar) VFS, `int 0x80` syscall ABI (`write`/`exit`/`read`), ring-3 execution with hardware memory isolation (per-task CR3), ELF64 loader, and a kernel-shell `run` command (Sprints 16–19)
 - **STF model format** — synthetic tensor loader for AI domain; proof-of-concept, not real inference
 
 **Not present yet:** memory isolation between processes (per-task CR3), filesystem writeback, storage driver integration with VFS, network stack, real model inference, preemption, ELF loader.
