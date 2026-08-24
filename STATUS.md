@@ -536,7 +536,28 @@ Sprint 22: N-task table + argv + wait().
 
 ---
 
+### Sprint 22 - Phase 4: argv + Exit Codes  Done
+**Date**: 2026-08-24
+**Goal**: Programs receive arguments and report status back.
+
+**How it works**:
+- sam_build_args() lays out a SysV-style initial stack: argument strings at
+  the top, argv[] pointer array (NULL-terminated) below, argc beneath that.
+  Entry RSP points at argc.
+- ABI (frozen): [rsp]=argc, [rsp+8..]=argv[0..n] pointers, argv[argc]=NULL.
+  User programs use `mov r15,[rsp]` / `lea r14,[rsp+8]`.
+- exit(code) is recorded per task; the shell `run` command now reports
+  "task exited with code N".
+- echo.elf prints all its arguments and exits with argc — CI verifies the
+  full round trip (4 args in, exit code 4 out).
+
+**Honest scope**: max 8 args, single-digit-friendly printing, no environment
+block, no wait()/status-retrieval between tasks yet.
+
+---
 ### Sprint 16 — Phase 4: VFS + initrd + Syscalls + First Ring-3 Process  ✅
+
+
 **Date**: 2026-08-23
 **Goal**: Run a second piece of code that is not the kernel — the app model exists.
 

@@ -58,25 +58,46 @@ uint64_t sam_kernel_ret;
 uint64_t sam_kernel_cr3;    /* Sprint 17: boot CR3, restored on resume */
 uint64_t g_task_end_reason; /* TASK_END_* — set before longjmp resume  */
 
-/* ── Sprint 20: preemption ────────────────────────────────────────────── */
+/* ── Sprint 20/21: preemption + resident task table ───────────────────── */
 #define TASK_END_NONE     0
 #define TASK_END_EXIT     1
 #define TASK_END_FAULT    2
 #define TASK_END_PREEMPT  3
 
 typedef struct {
-    cpu_frame_t frame;      /* full register snapshot at preemption */
-    uint64_t    cr3;        /* task address space                   */
+    cpu_frame_t frame;      /* full register snapshot / initial state */
+    uint64_t    cr3;        /* task address space                     */
+    int         started;    /* 0 = never dispatched                   */
 } sam_tcb_t;
 
-sam_tcb_t g_tcb;                    /* saved context of running task  */
-uint64_t  g_user_cr3      = 0;      /* active task CR3, 0 = none      */
-uint64_t  g_preempt_count = 0;      /* total preemptions              */
-uint64_t  g_tick_count    = 0;      /* PIT ticks since boot           */
-uint64_t  g_quantum       = 0;      /* ticks used in current slice    */
-#define SAM_QUANTUM_TICKS 3         /* ~30 ms slices @ 100 Hz          */
+#define SAM_MAX_TASKS 2
+
+sam_tcb_t g_tasks[SAM_MAX_TASKS];   /* resident tasks                    */
+uint64_t  g_entry[SAM_MAX_TASKS];   /* entry RIPs (set before launch)    */
+uint64_t  g_stktop[SAM_MAX_TASKS];  /* user stack tops                   */
+int       g_ntasks      = 0;        /* how many slots are in play        */
+int       g_cur         = 0;        /* currently scheduled index         */
+int       g_end_idx     = 0;        /* task that exited/faulted          */
+uint64_t  g_exit_code   = 0;        /* Sprint 22: exit(code) of last end */
+uint64_t  g_preempt_count = 0;      /* total preemptions                 */
+uint64_t  g_tick_count  = 0;        /* PIT ticks since boot              */
+uint64_t  g_quantum     = 0;        /* ticks used in current slice       */
+#define SAM_QUANTUM_TICKS 3         /* ~30 ms slices @ 100 Hz            */
 
 void *g_task_jb[5];
+
+/* Sprint 21: prepare a task slot's initial user frame (first dispatch). */
+static void sam_task_mark_start(int i) {
+    if (g_tasks[i].started) return;
+    cpu_frame_t *fr = &g_tasks[i].frame;
+    for (int z = 0; z < 21; z++) ((uint64_t *)fr)[z] = 0;
+    fr->rip    = g_entry[i];
+    fr->rsp    = g_stktop[i];
+    fr->cs     = SEL_USER_CODE;
+    fr->ss     = SEL_USER_DATA;
+    fr->rflags = 0x202;
+    g_tasks[i].started = 1;
+}
 
 /* ── Enter ring 3 in a fresh address space. Control returns ONLY via
  * __builtin_longjmp (exit syscall or ring-3 fault) into the setjmp site
@@ -115,18 +136,21 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f);    /* fwd decl */
 
 /* ── Unified interrupt entry: exceptions panic, vector 0x80 = syscall ─── */
 void sam_interrupt_dispatcher(cpu_frame_t *f) {
-    /* Sprint 20: PIT tick — EOI always, preempt ring-3 tasks on quantum */
+    /* Sprint 20/21: PIT tick — EOI, then round-robin the resident tasks */
     if (f->vector == 32) {
         outb(0x20, 0x20);           /* EOI to master PIC            */
         g_tick_count++;
-        if (g_user_cr3 && (f->cs & 3) == 3 &&
+        if (g_ntasks > 0 && (f->cs & 3) == 3 &&
             ++g_quantum >= SAM_QUANTUM_TICKS) {
             g_quantum = 0;
             g_preempt_count++;
-            g_tcb.frame = *f;       /* full register snapshot       */
-            g_tcb.cr3   = g_user_cr3;
-            g_task_end_reason = TASK_END_PREEMPT;
-            __builtin_longjmp(g_task_jb, 1);
+            g_tasks[g_cur].frame = *f;          /* snapshot current   */
+
+            int next = (g_cur + 1) % g_ntasks;
+            sam_task_mark_start(next);
+            g_cur = next;
+            sam_user_resume(&g_tasks[next].frame, g_tasks[next].cr3);
+            /* sam_user_resume never returns here (iretq into the task) */
         }
         return;                     /* plain tick: iretq back       */
     }
@@ -143,6 +167,7 @@ void sam_interrupt_dispatcher(cpu_frame_t *f) {
         serial_puts("[OK] ring-3 access violation faulted (#PF) at ");
         serial_puthex(f->rip); serial_puts("\n");
         g_task_end_reason = TASK_END_FAULT;
+        g_end_idx = g_cur;
         __builtin_longjmp(g_task_jb, 1);
         /* not reached */
     }
@@ -170,10 +195,12 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
     }
 
     case SAM_SYS_EXIT:
-        /* Sprint 18: exit RESUMES the kernel via longjmp — CR3 is restored
-         * in the resumed branch; the task is gone, the kernel carries on. */
+        /* Sprint 18/21+22: record the exit CODE, then longjmp to the
+         * kernel await-point, which decides what runs next. */
         serial_puts("[OK] ring-3 task exited cleanly\n");
+        g_exit_code = f->rdi;
         g_task_end_reason = TASK_END_EXIT;
+        g_end_idx = g_cur;
         __builtin_longjmp(g_task_jb, 1);
         /* not reached */
         for (;;) __asm__ volatile ("hlt");

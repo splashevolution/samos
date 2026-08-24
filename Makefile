@@ -84,7 +84,7 @@ $(BUILD)/userasm.o: kernel/userasm.asm | $(BUILD)
 # ── Kernel headers (any change triggers C recompile) ─────────
 KERNEL_HEADERS := kernel/mcp.h kernel/fb.h kernel/boot_config.h \
                   kernel/panic.h kernel/idt.h kernel/syscall.h kernel/vfs.h \
-                  kernel/vmm.h kernel/elf.h kernel/pit.h kernel/acpi.h kernel/ps2kbd.h \
+                  kernel/vmm.h kernel/elf.h kernel/pit.h kernel/elf.h kernel/acpi.h kernel/ps2kbd.h \
                   kernel/ata.h kernel/wizard.h kernel/shell.h kernel/simd.h \
                   kernel/scheduler.h kernel/stf.h
 
@@ -111,8 +111,11 @@ $(STF_FILE): $(STF_TOOL) | $(BUILD)
 # ── Sprint 16-20: initrd (ustar) with SAM OS ELF64 user programs ────
 GUARD_ELF := $(BUILD)/guard.elf
 HELLO_ELF := $(BUILD)/hello.elf
-LOOP_ELF  := $(BUILD)/loop.elf
-INITRD    := $(BUILD)/initrd.tar
+LOOP_ELF   := $(BUILD)/loop.elf
+LOOPA_ELF  := $(BUILD)/loopa.elf
+LOOPB_ELF  := $(BUILD)/loopb.elf
+ECHO_ELF   := $(BUILD)/echo.elf
+INITRD     := $(BUILD)/initrd.tar
 
 $(BUILD)/guard.elf: user/guard.asm | $(BUILD)
 	nasm -f elf64 -o $(BUILD)/guard.o $<
@@ -129,13 +132,31 @@ $(BUILD)/loop.elf: user/loop.asm | $(BUILD)
 	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
 	    $(BUILD)/loop.o -o $@
 
-$(INITRD): $(GUARD_ELF) $(HELLO_ELF) $(LOOP_ELF) | $(BUILD)
+$(BUILD)/loopa.elf: user/loopa.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/loopa.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/loopa.o -o $@
+
+$(BUILD)/loopb.elf: user/loopb.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/loopb.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker_b.ld -e start -z noseparate-code \
+	    $(BUILD)/loopb.o -o $@
+
+$(BUILD)/echo.elf: user/echo.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/echo.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/echo.o -o $@
+
+$(INITRD): $(GUARD_ELF) $(HELLO_ELF) $(LOOP_ELF) $(LOOPA_ELF) $(LOOPB_ELF) $(ECHO_ELF) | $(BUILD)
 	rm -rf $(BUILD)/initrd
 	mkdir -p $(BUILD)/initrd
 	cp $(GUARD_ELF) $(BUILD)/initrd/guard.elf
 	cp $(HELLO_ELF) $(BUILD)/initrd/hello.elf
 	cp $(LOOP_ELF)  $(BUILD)/initrd/loop.elf
-	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf loop.elf
+	cp $(LOOPA_ELF) $(BUILD)/initrd/loopa.elf
+	cp $(LOOPB_ELF) $(BUILD)/initrd/loopb.elf
+	cp $(ECHO_ELF)  $(BUILD)/initrd/echo.elf
+	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf loop.elf loopa.elf loopb.elf echo.elf
 
 $(ISO): $(KERNEL) $(GGUF_FILE) $(STF_FILE) $(INITRD) | $(GRUB_DIR)
 	cp $(KERNEL)    $(BOOT_DIR)/$(TARGET).elf
@@ -220,7 +241,7 @@ test: iso-ci
 	for marker in \
 	    "dot\(\[1\.\.32\]" \
 	    "\[PASS\]" \
-	    "Sprint 20 PASS"; \
+	    "Sprint 22 PASS"; \
 	do \
 	    if grep -qE "$$marker" $(SERIAL_LOG) 2>/dev/null; then \
 	        echo "  [OK]  $$marker"; \

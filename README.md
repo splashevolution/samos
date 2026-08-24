@@ -8,7 +8,7 @@ A bare-metal x86-64 research kernel exploring CPU-only AI inference and retro ga
 
 > **Why?** Millions of capable machines are abandoned by vendor-locked update cycles while AI demand inflates hardware prices. SAM OS revives them as sovereign, on-device AI appliances. See [VISION.md](VISION.md) — including the Make-in-India alignment.
 
-> **Status: Research prototype, Sprint 21.** Boot → graphical OOBE wizard → interactive kernel shell → run ELF programs in isolated ring 3. What works today is real. What comes next is clearly labelled — see the [honest platform-maturity table](VISION.md#honest-maturity-are-we-a-laptopdesktopmobileserver-os-yet).
+> **Status: Research prototype, Sprint 22.** Boot → graphical OOBE wizard → interactive kernel shell → run ELF programs in isolated ring 3. What works today is real. What comes next is clearly labelled — see the [honest platform-maturity table](VISION.md#honest-maturity-are-we-a-laptopdesktopmobileserver-os-yet).
 
 ---
 
@@ -20,7 +20,7 @@ A Core i5 with SSE4.2 can do meaningful INT8 matrix math in bare-metal mode. Nob
 
 ---
 
-## What Exists Today (Sprint 21)
+## What Exists Today (Sprint 22)
 
 - **Multiboot2 boot** — GRUB2 → 64-bit long mode, identity-mapped 4 GiB, SSE/FPU initialised
 - **Graphical OOBE wizard** — 1024×768 pixel GUI (Bochs VBE direct I/O), dark sidebar, hostname/WiFi setup
@@ -38,6 +38,7 @@ A Core i5 with SSE4.2 can do meaningful INT8 matrix math in bare-metal mode. Nob
   - ELF64 loader (static ET_EXEC, segments validated against the user region)
   - PIT preemption (100 Hz) with transparent resume (Sprint 20)
   - **Round-robin scheduling of two resident tasks** — independent address spaces, time-sliced by the timer (Sprint 21)
+  - **argv + exit codes** — programs receive arguments on their stack; `run echo.elf alpha beta` reports the exit code (Sprint 22)
   - Shell command `run hello.elf` loads and runs an initrd program in ring 3
 
 Try it in the shell:
@@ -62,7 +63,7 @@ See [ROADMAP.md](ROADMAP.md) for the full plan. Summary:
 | 1 | Truth stabilization — docs, reproducible build, `make test` | ✅ Done |
 | 2 | Kernel safety — exception handlers, panic screen, bounds checks | ✅ Done (Sprint 14) |
 | 3 | Real hardware — ACPI, full PCI scan, ATA/AHCI disk, USB HID | ✅ Mostly done (Sprint 15); full PCI scan + USB HID remain |
-| 4 | Storage + app model — VFS, initrd, syscall ABI, first ring-3 process | 🔄 In progress (Sprints 16–19): VFS ✅ syscalls ✅ isolated ring 3 ✅ task switch ✅ ELF loader ✅ · remaining: argv + wait(), N>2 task slots, writable FS |
+| 4 | Storage + app model — VFS, initrd, syscall ABI, first ring-3 process | 🔄 In progress (Sprints 16–19): VFS ✅ syscalls ✅ isolated ring 3 ✅ task switch ✅ ELF loader ✅ · remaining: wait()/join between tasks, N>2 task slots, writable FS |
 | 5 | Real inference — tokenizer, transformer forward pass, next-token loop | Future |
 | 6 | Compatibility — SAM ABI → Lua → WASM → JVM subset → Linux compat | Far future |
 
