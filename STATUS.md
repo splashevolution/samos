@@ -510,6 +510,32 @@ MULTIPLE resident tasks is the natural Sprint 21.
 
 ---
 
+
+### Sprint 21 - Phase 4: Round-Robin Between Two Resident Ring-3 Tasks  Done
+**Date**: 2026-08-24
+**Goal**: Two tasks live at once; the timer decides who runs.
+
+**How it works**:
+- Per-task user windows: task slots get separate 4 MiB regions
+  (0x19000000 / 0x19500000), each with its own address space (CR3) and stack.
+- The PIT tick handler is now a SCHEDULER: on quantum expiry it snapshots the
+  running task into its TCB and iretqs directly into the next resident task -
+  no kernel round-trip. First dispatch of a not-yet-started task synthesizes
+  its initial frame (rip/cs/rflags/rsp/ss).
+- Exit/fault longjmps to the kernel await-point, which counts it and resumes
+  the survivor until all resident tasks are gone.
+- Boot evidence (interleaved output from two independent address spaces):
+  [A]1 [A]2 [B]1 [B]2 [B]3 [A]3 [A]4 [A]5 [B]4 [B]5
+  [sched] task 0 ended (exit)
+  [sched] task 1 ended (exit)
+  [PASS] Sprint 21: two resident tasks scheduled round-robin
+
+**Honest scope**: fixed two slots, static load addresses per slot, no
+priorities, no sleep/wake, exit codes not yet surfaced to shell. Natural
+Sprint 22: N-task table + argv + wait().
+
+---
+
 ### Sprint 16 — Phase 4: VFS + initrd + Syscalls + First Ring-3 Process  ✅
 **Date**: 2026-08-23
 **Goal**: Run a second piece of code that is not the kernel — the app model exists.
@@ -621,7 +647,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 | 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
 | 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
 | 3 — Hardware | ACPI, PS/2 IRQ keyboard, ATA PIO disk | ✅ Done (Sprint 15); full PCI scan + USB HID remain |
-| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 In progress; Sprints 16–19 done (VFS, syscalls, CR3 isolation, task switch, ELF loader, shell `run`). Next: multi-task round-robin, argv |
+| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 In progress; Sprints 16–21 done (VFS, syscalls, CR3 isolation, task switch, ELF loader, shell `run`, PIT preemption, round-robin). Next: argv + wait(), N-task table |
 | 5 — Inference | Real model end-to-end on bare metal | Future |
 | 6 — Compatibility | SAM ABI → Lua → WASM → Linux compat | Far future |
 
