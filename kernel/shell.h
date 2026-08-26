@@ -365,10 +365,12 @@ static void cmd_unknown(sam_shell_t *sh, const char *cmd) {
     sh_puts(sh, "  (type 'help')\n", SH_GREY);
 }
 
-/* Sprint 19/22: `run <name> [args...]` — load an ELF from the initrd and
- * run it in ring 3 with argv; kernel resumes when the task exits/faults.
- * sam_run_task() is provided by main.c. */
-static int sam_run_task(const char *name, char **argv, int argc);
+/* Sprint 19/22/23: `run <name> [args...]` — load an ELF from the initrd and
+ * run it in ring 3 with argv; kernel runs all resident tasks round-robin.
+ * Defined in syscall.h (included later in main.c's TU) — static fwd decls
+ * here match that internal linkage, same pattern as the old sam_run_task. */
+static int sam_task_create(const char *name, char **argv, int argc);
+static int sam_task_run_loop(void);
 extern uint64_t g_exit_code;   /* defined in syscall.h (main.c TU) */
 
 static void cmd_run(sam_shell_t *sh, const char *args) {
@@ -394,7 +396,7 @@ static void cmd_run(sam_shell_t *sh, const char *args) {
         return;
     }
 
-    sh_puts(sh, "\n  [run] starting ", SH_CYAN);
+    sh_puts(sh, "\n  [run] creating task ", SH_CYAN);
     sh_puts(sh, av[0], SH_CYAN);
     for (int a = 1; a < ac; a++) {
         sh_puts(sh, " ", SH_CYAN);
@@ -402,14 +404,26 @@ static void cmd_run(sam_shell_t *sh, const char *args) {
     }
     sh_puts(sh, "\n", SH_CYAN);
 
-    int r = sam_run_task(av[0], av, ac);
-    if (r == TASK_END_EXIT) {
-        sh_puts(sh, "  [run] task exited with code ", SH_GREEN);
+    int slot = sam_task_create(av[0], av, ac);
+    if (slot < 0) {
+        sh_puts(sh, "  [run] task failed to create\n", SH_RED);
+        return;
+    }
+
+    sh_puts(sh, "  [run] task created in slot ", SH_GREEN);
+    sh_putdec(sh, slot, SH_GREEN);
+    sh_puts(sh, ", running...\n", SH_GREEN);
+
+    int clean = sam_task_run_loop();
+    if (clean > 0) {
+        sh_puts(sh, "  [run] ", SH_GREEN);
+        sh_putdec(sh, clean, SH_GREEN);
+        sh_puts(sh, " task(s) exited cleanly, last exit code ", SH_GREEN);
         sh_putdec(sh, g_exit_code, SH_GREEN);
         sh_puts(sh, "\n", SH_GREEN);
+    } else {
+        sh_puts(sh, "  [run] all tasks faulted or failed\n", SH_YELLOW);
     }
-    else if (r == TASK_END_FAULT) sh_puts(sh, "  [run] task faulted (isolation held)\n", SH_YELLOW);
-    else                          sh_puts(sh, "  [run] task failed to start\n", SH_RED);
 }
 
 /* ── Eval ─────────────────────────────────────────────────────────────────── */

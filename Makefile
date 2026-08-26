@@ -112,8 +112,9 @@ $(STF_FILE): $(STF_TOOL) | $(BUILD)
 GUARD_ELF := $(BUILD)/guard.elf
 HELLO_ELF := $(BUILD)/hello.elf
 LOOP_ELF   := $(BUILD)/loop.elf
-LOOPA_ELF  := $(BUILD)/loopa.elf
-LOOPB_ELF  := $(BUILD)/loopb.elf
+LOOPS_ELF  := $(BUILD)/loops.elf
+PROBEB_ELF := $(BUILD)/probeb.elf
+WAITER_ELF := $(BUILD)/waiter.elf
 ECHO_ELF   := $(BUILD)/echo.elf
 INITRD     := $(BUILD)/initrd.tar
 
@@ -132,31 +133,39 @@ $(BUILD)/loop.elf: user/loop.asm | $(BUILD)
 	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
 	    $(BUILD)/loop.o -o $@
 
-$(BUILD)/loopa.elf: user/loopa.asm | $(BUILD)
-	nasm -f elf64 -o $(BUILD)/loopa.o $<
+# Sprint 24: canonical shared-VA binaries (single link address)
+$(BUILD)/loops.elf: user/loops.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/loops.o $<
 	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
-	    $(BUILD)/loopa.o -o $@
+	    $(BUILD)/loops.o -o $@
 
-$(BUILD)/loopb.elf: user/loopb.asm | $(BUILD)
-	nasm -f elf64 -o $(BUILD)/loopb.o $<
-	ld -m elf_x86_64 -nostdlib -T user/linker_b.ld -e start -z noseparate-code \
-	    $(BUILD)/loopb.o -o $@
+$(BUILD)/probeb.elf: user/probeb.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/probeb.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/probeb.o -o $@
+
+# Sprint 25: ring-3 parent for waitpid lifecycle tests
+$(BUILD)/waiter.elf: user/waiter.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/waiter.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/waiter.o -o $@
 
 $(BUILD)/echo.elf: user/echo.asm | $(BUILD)
 	nasm -f elf64 -o $(BUILD)/echo.o $<
 	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
 	    $(BUILD)/echo.o -o $@
 
-$(INITRD): $(GUARD_ELF) $(HELLO_ELF) $(LOOP_ELF) $(LOOPA_ELF) $(LOOPB_ELF) $(ECHO_ELF) | $(BUILD)
+$(INITRD): $(GUARD_ELF) $(HELLO_ELF) $(LOOP_ELF) $(LOOPS_ELF) $(PROBEB_ELF) $(WAITER_ELF) $(ECHO_ELF) | $(BUILD)
 	rm -rf $(BUILD)/initrd
 	mkdir -p $(BUILD)/initrd
 	cp $(GUARD_ELF) $(BUILD)/initrd/guard.elf
 	cp $(HELLO_ELF) $(BUILD)/initrd/hello.elf
 	cp $(LOOP_ELF)  $(BUILD)/initrd/loop.elf
-	cp $(LOOPA_ELF) $(BUILD)/initrd/loopa.elf
-	cp $(LOOPB_ELF) $(BUILD)/initrd/loopb.elf
+	cp $(LOOPS_ELF) $(BUILD)/initrd/loops.elf
+	cp $(PROBEB_ELF) $(BUILD)/initrd/probeb.elf
+	cp $(WAITER_ELF) $(BUILD)/initrd/waiter.elf
 	cp $(ECHO_ELF)  $(BUILD)/initrd/echo.elf
-	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf loop.elf loopa.elf loopb.elf echo.elf
+	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf loop.elf loops.elf probeb.elf waiter.elf echo.elf
 
 $(ISO): $(KERNEL) $(GGUF_FILE) $(STF_FILE) $(INITRD) | $(GRUB_DIR)
 	cp $(KERNEL)    $(BOOT_DIR)/$(TARGET).elf
@@ -220,9 +229,10 @@ iso-ci: $(KERNEL) $(GGUF_FILE) $(STF_FILE) $(INITRD) | $(GRUB_DIR)
 #   [PASS] benchmark
 #   [PASS] STF
 #   Sprint 16 PASS   (ring-3 hello process)
+#   Sprint 23 PASS   (N-task resident scheduling)
 #
 SERIAL_LOG := $(BUILD)/serial.log
-TEST_TIMEOUT := 45   # seconds before QEMU is killed (TCG is slow)
+TEST_TIMEOUT := 60   # seconds before QEMU is killed (TCG slow, Sprint 23 adds time)
 
 .PHONY: test
 test: iso-ci
@@ -241,7 +251,10 @@ test: iso-ci
 	for marker in \
 	    "dot\(\[1\.\.32\]" \
 	    "\[PASS\]" \
-	    "Sprint 22 PASS"; \
+	    "Sprint 22 PASS" \
+	    "Sprint 23 PASS" \
+	    "Sprint 24 PASS" \
+	    "Sprint 25 PASS"; \
 	do \
 	    if grep -qE "$$marker" $(SERIAL_LOG) 2>/dev/null; then \
 	        echo "  [OK]  $$marker"; \

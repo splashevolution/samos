@@ -659,6 +659,103 @@ preemption via PIT, multiple resident tasks, argv + exit codes surfaced to shell
 
 ---
 
+### Sprint 23 — Phase 4: Fixed-Capacity N-Task Kernel ✅
+**Date**: 2026-08-25
+**Goal**: Generalize the Sprint 21 two-resident-task implementation into a fixed-capacity (16-slot) preemptive kernel with explicit TCB state machine, generic creation, and a run/drain loop.
+
+**How it works**:
+- `kernel/syscall.h`: `task_state_t` (FREE/READY/RUNNING/ZOMBIE) with enforced invariants — at most one RUNNING; ZOMBIE only via exit/#PF; full-drain cleanup resets slots.
+- `sam_task_create()` / `sam_task_run_loop()` replace the per-test setjmp scaffolding; PIT tick delegates to `sam_scheduler_tick()`.
+- Per-create E820 validation of each task's window; first dispatch uses the argv-adjusted `init_rsp`; saved `cpu_frame_t` authoritative after preemption.
+
+**Honest scope**: slot index served as task ID; binaries were tied to slot link addresses (5 MiB stride) because mappings were identity-like — removed in Sprint 24. VMM page-table pages leak (~12 KiB/CR3); no waitpid.
+
+---
+
+### Sprint 24 — Phase 4: Shared User Virtual Address Space ✅
+**Date**: 2026-08-25
+**Goal**: Remove the slot ↔ executable-link-address coupling. One canonical user VA layout; one ET_EXEC binary runs simultaneously in any number of slots.
+
+**How it works**:
+- Canonical layout (identical in every CR3): code VA `0x19000000–0x19200000`, stack VA `0x19200000–0x19400000`.
+- Deterministic physical backing by slot: `code_pa = 0x19000000 + k·4 MiB`, `stack_pa = code_pa + 2 MiB`. Freed slots reuse their same backing — the arena does not leak across batches.
+- `vmm_create_user_as_pa(code_pa, stack_pa)` replaces wholesale the two canonical PD entries (pd[200]/pd[201], U/S=1 → task-owned frames); every other GiB-0 entry stays supervisor-only identity. A live audit walks the fresh tables and prints both entries.
+- `elf_load_pa()` validates that every PT_LOAD vaddr (and entry) lies in the canonical 2 MiB code region, then copies to `code_pa + (p_vaddr - USER_CODE_VA)`; BSS zeroed in backing; foreign (non-canonical) binaries rejected.
+- argv: builder writes into PHYSICAL stack backing but stores VIRTUAL pointers and returns the virtual RSP (`pa2va_delta = stack_pa − USER_STACK_BASE`). Slot-0-only identity coincidence made this invisible until multi-slot runs — caught by CI as #PF on `argv[1]` dereference in slots ≥1, fixed, regression-proven by Sprint 22 marker.
+- Boot-time E820 capacity discovery counts consecutive usable 4 MiB slots at the arena; runtime capacity = min(16, usable). Creation beyond capacity fails safely.
+
+**Boot evidence**:
+```
+[OK] Sprint 24: task backing capacity 16/16 slots usable @0x19000000
+[aud] pd[200]→0x19000000 pd[201]→0x19200000  U/S=1 [PASS]   (slot 0)
+[aud] pd[200]→0x19400000 pd[201]→0x19600000  U/S=1 [PASS]   (slot 1)
+[aud] task 0 va=0x19000000→pa=0x19000000 | task 1 va=0x19000000→pa=0x1940000  DIVERGENT [PASS]
+[PASS] Sprint 24: 4 instances of one binary resident
+[PASS] Sprint 24: 4/4 exited cleanly, N preemptions   (W/X/Y/Z interleaved)
+[PASS] Sprint 24: cross-process PA read faulted (#PF), survivor ran on
+[SAM OS] Sprint 24 PASS -- shared user VA, per-task physical backing
+```
+
+**Honest scope**: no waitpid/PPID/background jobs/PID allocator; no VMM reclamation (page-table bump still leaks ~12 KiB per new CR3); 2 MiB huge pages only; no COW/PIE/ASLR/execve/SMP.
+
+---
+
+### Sprint 25 — Phase 4: Process Identity, Parent/Child Lifecycle, Blocking waitpid ✅
+**Date**: 2026-08-25
+**Goal**: Introduce real process identity (PID independent of slot), parent/child
+relationships on TCB metadata, a WAITING state with true blocking `waitpid`,
+and unified exit/fault termination bookkeeping.
+
+**How it works**:
+- 32-bit monotonic PIDs from 1 (`SAM_PID_KERNEL`=0 reserved for the kernel;
+  shell/boot-created tasks get ppid 0). Wraparound skips 0 and scans live
+  TCBs; a reused slot always receives a fresh PID.
+- TCB gains `pid/ppid/term_reason/wait_target/wait_status_va`; states add
+  TASK_WAITING. Scheduler selection still matches only READY/RUNNING.
+- Unified `sam_task_terminate()` handles exit AND fatal ring-3 faults:
+  ZOMBIE + reason/code recorded, orphans re-parented to kernel, then one
+  matching WAITING parent is woken — 64-bit status (reason<<32|code; fault
+  code = vector) written through the Sprint-24 VA→PA ownership helper,
+  saved RAX preset to child PID, child ZOMBIE→FREE only after transfer.
+- Blocking waitpid switches away FROM SYSCALL CONTEXT exactly like PIT
+  preemption: validated args first; successor REQUIRED before state change
+  (else `-WPID_E_DEADLOCK`, caller stays RUNNING); frame snapshot into TCB;
+  `sam_user_resume()` of successor. The abandoned syscall never returns.
+- Immediate reap path never touches the scheduler; deterministic lowest-slot
+  selection for wait-any zombies. SAM-native errors: BADPID/-1 NOTCHILD/-2
+  NOCHILDREN/-3 BADPTR/-4 BADOPTS/-5 DEADLOCK/-6. options must be 0.
+- Ring-3 #PF branch now prints CR2 directly — hardware evidence of the
+  exact faulting linear address (Sprint 24 isolation probe shows CR2 =
+  0x19600000, the slot-1 stack PA).
+- Latent bug fixed en route: argc==0 programs previously received
+  rsp == USER_STACK_TOP (unmapped boundary); builder now reserves scratch,
+  so argv-scanning binaries can no longer fault on the boundary word.
+
+**Boot evidence**:
+```
+[rel] child slot 0 pid=13 -> parent pid=14
+[reap] task 1 reaped child 13 (slot 0 freed)          ← immediate reap
+[W] wait OK got=13 status=0x0000000000000000
+[block] task 1 WAITING (target 4294967295)            ← RUNNING→WAITING
+[run] successor task 2 dispatched from syscall context
+[CR2] faulting linear address: 0x0000000019600000
+[wake] task 1 READY <- child 17 (fault)               ← reap-at-wake
+[sched] task 2 ended (fault, already reaped)          ← idempotent await point
+[W] wait OK got=17 status=0x000000010000000E          ← TERM_FAULT<<32 | 14
+[W] probe not-child -> -2 OK / bad-options -> -5 OK / bad-pid -> -1 OK
+[OK] Sprint 25: slot 0 reused by fresh pid 20 (max previously seen 17) [PASS]
+[SAM OS] Sprint 25 PASS -- process identity + waitpid lifecycle
+```
+
+**Honest scope**: no spawn/fork/execve (CI constructs parenthood directly on
+TCB metadata; validation is the same code any future creator would use);
+no background jobs/signals/WNOHANG; VMM page-table leak unchanged (~12 KiB
+per created address space, pool exhaustion after ~85 four-task batches);
+one waiter per child (a second matching waiter stays blocked until the
+batch-drain sweep frees everything).
+
+---
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
@@ -668,7 +765,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 | 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
 | 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
 | 3 — Hardware | ACPI, PS/2 IRQ keyboard, ATA PIO disk | ✅ Done (Sprint 15); full PCI scan + USB HID remain |
-| 4 — App model | VFS, initrd, syscall ABI, ring-3 process | 🔄 In progress; Sprints 16–21 done (VFS, syscalls, CR3 isolation, task switch, ELF loader, shell `run`, PIT preemption, round-robin). Next: argv + wait(), N-task table |
+| 4 — App model | VFS, initrd, syscall ABI, ring-3 process, N-task scheduling | 🔄 In progress; Sprints 16–25 done (VFS, syscalls, CR3 isolation, task switch, ELF loader, shell `run`, PIT preemption, round-robin, argv+exit codes, N-task table, shared-VA multi-process, PID/PPID + blocking waitpid). Next: spawn-shaped creation, writable FS |
 | 5 — Inference | Real model end-to-end on bare metal | Future |
 | 6 — Compatibility | SAM ABI → Lua → WASM → Linux compat | Far future |
 

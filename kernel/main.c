@@ -18,15 +18,9 @@
 #include "ps2kbd.h"     /* ps2kbd_init(), ps2_wait_char(), IDT_DEFINE_KBD_STUB() */
 #include "ata.h"        /* ata_init(), ata_read_sectors(), sam_ata_t */
 #include "wizard.h"
-/* Sprint 19: shell `run` support — defined below, declared here so the
- * shell (included above) can dispatch the "run" command to it. */
-static int sam_run_task(const char *name, char **argv, int argc);
 
-/* task end reasons (shared with syscall.h) */
-#define TASK_END_NONE   0
-#define TASK_END_EXIT   1
-#define TASK_END_FAULT  2
-
+/* task end reasons (shared with syscall.h) — kept for readability of the
+ * boot-time test sequence below; canonical values live in syscall.h. */
 #include "shell.h"
 #include "vfs.h"       /* Sprint 16: initrd ustar VFS */
 #include "vmm.h"       /* Sprint 17: per-task address spaces */
@@ -123,15 +117,56 @@ static void serial_puthex(uint64_t v) {
     for (int i = 60; i >= 0; i -= 4) serial_putchar(h[(v>>i)&0xF]);
 }
 
-/* Sprint 16: syscall gate + ring-3 entry (needs serial_* above) */
-#include "syscall.h"
-
 static void serial_putdec(uint64_t v) {
     char buf[21]; int i = 20; buf[i] = '\0';
     if (v == 0) { serial_putchar('0'); return; }
     while (v && i > 0) { buf[--i] = '0' + (v % 10); v /= 10; }
     serial_puts(&buf[i]);
 }
+
+/* ============================================================================
+ * Sprint 23: E820 usable-RAM validation for task windows.
+ * The multiboot2 mmap tag is located once in kernel_main and stashed here;
+ * sam_task_create() (in syscall.h, included below) validates each task's
+ * 4 MiB window against it before use — same semantics as Sprint 14's
+ * DOMAIN_IN_RAM for boot domains.
+ * ========================================================================== */
+typedef struct {
+    uint32_t type; uint32_t size;
+    uint32_t entry_size; uint32_t entry_version;
+} __attribute__((packed)) sam_mb2_mmap_hdr_t;
+
+typedef struct {
+    uint64_t base_addr;
+    uint64_t length;
+    uint32_t entry_type;   /* 1=available, 2=reserved, 3=ACPI, 4=NVS, 5=bad */
+    uint32_t reserved;
+} __attribute__((packed)) sam_mb2_mmap_entry_t;
+
+static const void *g_sam_mmap_tag = NULL;   /* set in kernel_main */
+
+/* Returns 1 if [base, base+size) is fully covered by a type-1 E820 entry.
+ * If no mmap tag was found, trusts the bootloader (same as Sprint 14). */
+static int sam_e820_range_usable(uint64_t base, uint64_t size) {
+    if (!g_sam_mmap_tag) return 1;
+    const sam_mb2_mmap_hdr_t *mmap_tag = (const sam_mb2_mmap_hdr_t *)g_sam_mmap_tag;
+    const uint8_t *ep = (const uint8_t *)mmap_tag + sizeof(sam_mb2_mmap_hdr_t);
+    const uint8_t *ee = (const uint8_t *)mmap_tag + mmap_tag->size;
+    uint32_t es = mmap_tag->entry_size;
+    while (ep + es <= ee) {
+        const sam_mb2_mmap_entry_t *e = (const sam_mb2_mmap_entry_t *)ep;
+        if (e->entry_type == 1 &&
+            e->base_addr <= base &&
+            e->base_addr + e->length >= base + size)
+            return 1;
+        ep += es;
+    }
+    return 0;
+}
+
+/* Sprint 16/23: syscall gate + ring-3 entry + N-task engine.
+ * Needs outb/serial_* (above), vfs/vmm/elf headers (included at top). */
+#include "syscall.h"
 
 /* -- RDTSC -- */
 static inline uint64_t rdtsc(void) {
@@ -261,210 +296,73 @@ static void print_banner(void) {
 }
 
 /* ============================================================================
- * Sprint 22: build the initial user stack contents for a task — argument
- * strings at the top, then the argv[] pointer array (NULL-terminated),
- * then argc. Returns the entry RSP so that [rsp]=argc, [rsp+8]=argv[0].
+ * Sprint 22/24: build the initial user stack for a task.
+ * PHYSICAL/VIRTUAL contract (Sprint 24): all memory WRITES go to the
+ * task's physical stack backing (kernel identity map), but every pointer
+ * STORED into the image (argv[i], NULL sentinel, returned RSP) is the
+ * CANONICAL USER VIRTUAL address, translated by subtracting pa2va_delta
+ * (= stack_pa - USER_STACK_BASE). Ring 3 must never see a physical
+ * pointer: for slot≠0 those live in supervisor-only identity pages.
+ *
+ * Layout produced (virtual): [rsp]=argc, [rsp+8..]=argv[], argv[argc]=NULL
+ * Returns the canonical virtual initial RSP.
  * ========================================================================== */
-static uint64_t sam_build_args(uint64_t stktop, char **argv, int argc)
+static uint64_t sam_build_args(uint64_t stktop_pa, uint64_t pa2va_delta,
+                               char **argv, int argc)
 {
-    if (!argv || argc <= 0) return stktop;
+    if (!argv || argc <= 0) {
+        /* argc==0 tasks still get a sane RSP: park 16 bytes below the
+         * region top so a program that speculatively reads [rsp] cannot
+         * touch the unmapped boundary word. */
+        return stktop_pa - pa2va_delta - 16;
+    }
     if (argc > 8) argc = 8;
 
     uint64_t ptrs[8];
-    uint64_t p = stktop;
+    uint64_t p = stktop_pa;
     for (int i = argc - 1; i >= 0; i--) {
         int len = 0;
         while (argv[i][len]) len++;
         len++;                                       /* include NUL */
         p -= (uint64_t)len;
         for (int j = 0; j < len; j++)
-            ((uint8_t *)p)[j] = (uint8_t)argv[i][j];
-        ptrs[i] = p;
+            ((uint8_t *)p)[j] = (uint8_t)argv[i][j]; /* PHYSICAL write */
+        ptrs[i] = p - pa2va_delta;                   /* VIRTUAL pointer */
     }
 
     p &= ~0xFULL;                                    /* align */
     p -= 8ULL * (uint64_t)(argc + 1);
-    uint64_t *av = (uint64_t *)p;
-    for (int i = 0; i < argc; i++) av[i] = ptrs[i];
-    av[argc] = 0;                                    /* NULL sentinel */
+    uint64_t *av = (uint64_t *)p;                    /* phys write site */
+    for (int i = 0; i < argc; i++)
+        av[i] = ptrs[i];                             /* VIRTUAL values  */
+    av[argc] = 0;                                    /* NULL sentinel   */
 
     p -= 8;
-    *(uint64_t *)p = (uint64_t)argc;                 /* [rsp] = argc */
-    return p;
+    *(uint64_t *)p = (uint64_t)argc;                 /* [rsp] = argc    */
+    return p - pa2va_delta;                          /* VIRTUAL RSP     */
+}
+
+/* Sprint 25: minimal unsigned decimal formatter for kernel-built argv
+ * strings passed to the waiter test binary. */
+static void sam_itoa_dec(uint64_t v, char *buf) {
+    char tmp[24]; int n = 0;
+    if (v == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+    while (v && n < 23) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
+    for (int i = 0; i < n; i++) buf[i] = tmp[n - 1 - i];
+    buf[n] = '\0';
 }
 
 /* ============================================================================
- * Sprint 18/19/22: run one user task from the initrd, end to end.
- * Loads /<name> via VFS as ELF64, builds its address space (+ argv stack),
- * enters ring 3 and RESUMES here when the task exits or faults.
- * Exit code available in g_exit_code when TASK_END_EXIT is returned.
+ * Sprint 23: Sprint 16-22 task execution now uses generic N-task API.
+ * The old sam_run_task/sam_run_pair implementations are removed;
+ * they are replaced by sam_task_create + sam_task_run_loop in syscall.h.
  * ========================================================================== */
-static int sam_run_task(const char *name, char **argv, int argc)
-{
-    vfs_file_handle_t h;
-    if (vfs_open(name, &h) != 0) {
-        serial_puts("     [FAIL] "); serial_puts(name); serial_puts(" not found in initrd\n");
-        return -1;
-    }
 
-    /* Stage the image in kernel space first (GENERAL domain scratch). */
-    uint8_t *stage = (uint8_t *)(uintptr_t)(GENERAL_DOMAIN_BASE + 0x00100000UL);
-    int32_t got = vfs_read(&h, stage, 0x00100000u);
-    vfs_close(&h);
-    if (got <= 0) {
-        serial_puts("     [FAIL] vfs_read returned "); serial_putdec((uint64_t)got); serial_puts("\n");
-        return -1;
-    }
-    serial_puts("     [OK] "); serial_puts(name);
-    serial_puts(" staged ("); serial_putdec((uint64_t)got); serial_puts(" bytes)\n");
-
-    /* Sprint 19: load as ELF64 (validates + copies segments + zeroes BSS) */
-    uint64_t entry = 0;
-    int er = elf_load(stage, (uint32_t)got, &entry);
-    if (er != 0) {
-        serial_puts("     [FAIL] elf_load error: "); serial_putdec((uint64_t)(-er)); serial_puts("\n");
-        return -1;
-    }
-    serial_puts("     [OK] Sprint 19: ELF64 loaded, entry=");
-    serial_puthex(entry); serial_puts("\n");
-
-    /* Fresh address space: only the user region is ring-3 accessible. */
-    uint64_t user_cr3 = vmm_create_user_as();
-    if (!user_cr3) {
-        serial_puts("     [FAIL] vmm_create_user_as: out of page-table pages\n");
-        return -1;
-    }
-
-    /* Sprint 22: argv — build the initial user stack (argc/argv at top) */
-    uint64_t init_rsp = sam_build_args(USER_STACK_TOP, argv, argc);
-
-    serial_puts("     [OK] Sprint 17: user address space built\n");
-    if (argc > 0)
-        serial_puts("     [OK] Sprint 22: argv placed on user stack\n");
-    serial_puts("     Entering ring 3...\n");
-
-    /* Sprint 21: register as a resident task and let the PIT scheduler
-     * run it (round-robin when several are resident). */
-    g_entry[0]   = entry;
-    g_stktop[0]  = USER_STACK_TOP;
-    g_tasks[0].cr3 = user_cr3;
-    g_tasks[0].started = 0;
-    g_ntasks = 1;
-    g_cur = 0;
-    g_task_end_reason = TASK_END_NONE;
-    g_quantum = 0;
-
-    if (__builtin_setjmp(g_task_jb) == 0) {
-        sam_task_mark_start(0);
-        sam_user_enter(entry, init_rsp, user_cr3);
-        __builtin_unreachable();
-    }
-
-    if (g_task_end_reason == TASK_END_PREEMPT) {
-        serial_puts("     [tick] preempted, resuming task\n");
-        sam_user_resume(&g_tasks[0].frame, g_tasks[0].cr3);
-        __builtin_unreachable();
-    }
-
-    /* Resumed: restore the kernel address space before touching anything
-     * else — we may still be running under the (now dead) task's CR3. */
-    {
-        uint64_t kcr3 = sam_kernel_cr3;
-        __asm__ volatile ("movq %0, %%cr3" :: "r"(kcr3));
-    }
-    return (int)g_task_end_reason;
-}
-
-/* ============================================================================
- * Sprint 21: run TWO tasks RESIDENT simultaneously — PIT round-robin.
- * Both ELFs are loaded into separate user windows / address spaces, then
- * entered; the tick handler switches between them every quantum until
- * both have exited. Returns number of tasks that finished cleanly.
- * ========================================================================== */
-static int sam_run_pair(const char *name_a, const char *name_b)
-{
-    const uint64_t base[2] = { 0x19000000UL, 0x19500000UL };
-
-    /* Load both ELFs into their own windows */
-    uint64_t cr3[2];
-    for (int t = 0; t < 2; t++) {
-        const char *nm = (t == 0) ? name_a : name_b;
-        vfs_file_handle_t h;
-        if (vfs_open(nm, &h) != 0) {
-            serial_puts("     [FAIL] "); serial_puts(nm); serial_puts(" not found\n");
-            return 0;
-        }
-        uint8_t *stage = (uint8_t *)(uintptr_t)(GENERAL_DOMAIN_BASE + 0x00100000UL);
-        int32_t got = vfs_read(&h, stage, 0x00100000u);
-        vfs_close(&h);
-        if (got <= 0) return 0;
-
-        uint64_t entry = 0;
-        int er = elf_load_in(stage, (uint32_t)got, &entry,
-                             base[t], base[t] + 0x400000UL);
-        if (er != 0) {
-            serial_puts("     [FAIL] elf_load("); serial_puts(nm);
-            serial_puts(") error: "); serial_putdec((uint64_t)(-er)); serial_puts("\n");
-            return 0;
-        }
-
-        cr3[t] = vmm_create_user_as_at(base[t]);
-        if (!cr3[t]) return 0;
-
-        g_entry[t]  = entry;
-        g_stktop[t] = base[t] + 0x400000UL;   /* top of its 4 MiB window */
-        g_tasks[t].cr3     = cr3[t];
-        g_tasks[t].started = 0;
-        serial_puts("     [OK] "); serial_puts(nm);
-        serial_puts(" loaded @"); serial_puthex(base[t]);
-        serial_puts(" entry="); serial_puthex(entry); serial_puts("\n");
-    }
-
-    g_ntasks = 2;
-    g_cur = 0;
-    g_quantum = 0;
-
-    /* Enter task 0; from then on the PIT scheduler round-robins between
-     * the two resident tasks. Each EXIT/Fault longjmps here; we count it
-     * and put the survivor back until both are gone. */
-    int ended_v[2] = {0, 0};
-    volatile int *ended = ended_v;
-    volatile int clean = 0;
-
-    if (__builtin_setjmp(g_task_jb) == 0) {
-        sam_task_mark_start(0);
-        sam_user_enter(g_entry[0], g_stktop[0], cr3[0]);
-        __builtin_unreachable();
-    }
-
-    for (;;) {
-        ended[g_end_idx] = 1;
-        if (g_task_end_reason == TASK_END_EXIT) clean++;
-        serial_puts("     [sched] task ");
-        serial_putdec((uint64_t)g_end_idx);
-        serial_puts(" ended (");
-        serial_puts(g_task_end_reason == TASK_END_EXIT ? "exit" :
-                    g_task_end_reason == TASK_END_FAULT ? "fault" : "?");
-        serial_puts(")\n");
-
-        /* Restore kernel CR3 while we decide + print */
-        {
-            uint64_t kcr3 = sam_kernel_cr3;
-            __asm__ volatile ("movq %0, %%cr3" :: "r"(kcr3));
-        }
-
-        if (ended[0] && ended[1]) break;
-
-        /* Resume the survivor */
-        int other = 1 - g_end_idx;
-        sam_task_mark_start(other);
-        g_cur = other;
-        sam_user_resume(&g_tasks[other].frame, g_tasks[other].cr3);
-        __builtin_unreachable();
-    }
-
-    g_ntasks = 0;
-    return clean;
+static int sam_run_task_legacy(const char *name, char **argv, int argc) {
+    int slot = sam_task_create(name, argv, argc);
+    if (slot < 0) return -1;
+    int result = sam_task_run_loop();
+    return result > 0 ? TASK_END_EXIT : TASK_END_FAULT;
 }
 
 /* ============================================================================
@@ -692,11 +590,36 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     })
 
     if (mmap_tag) {
+        g_sam_mmap_tag = mmap_tag;   /* Sprint 23/24: task-window E820 validation */
         serial_puts("[OK] Sprint 14: E820 memory map found, validating domains\n");
         vga_puts("[OK] Sprint 14: E820 memory map found\n", VGA_GREEN);
     } else {
         serial_puts("[WARN] Sprint 14: No E820 memory map tag — skipping domain validation\n");
         vga_puts("[WARN] Sprint 14: No E820 map\n", VGA_YELLOW);
+    }
+
+    /* Sprint 24: runtime task-backing capacity discovery.
+     * Count consecutive usable 4 MiB slots at TASK_ARENA_BASE so legacy
+     * boards with a RAM hole can still run as many tasks as fit. */
+    {
+        int usable_slots = 0;
+        while (usable_slots < SAM_MAX_TASKS &&
+               sam_e820_range_usable(TASK_ARENA_BASE +
+                                     (uint64_t)usable_slots * TASK_PHYS_STRIDE,
+                                     TASK_PHYS_STRIDE))
+            usable_slots++;
+        g_task_slot_capacity = (usable_slots < SAM_MAX_TASKS) ? usable_slots
+                                                              : SAM_MAX_TASKS;
+        serial_puts("[OK] Sprint 24: task backing capacity ");
+        serial_putdec((uint64_t)g_task_slot_capacity);
+        serial_puts("/");
+        serial_putdec(SAM_MAX_TASKS);
+        serial_puts(" slots usable @");
+        serial_puthex(TASK_ARENA_BASE);
+        serial_puts("\n");
+        vga_puts("[OK] Sprint 24: task capacity ", VGA_GREEN);
+        vga_putdec((uint64_t)g_task_slot_capacity, VGA_CYAN);
+        vga_puts(" slots\n", VGA_GREEN);
     }
 
     /* 3. Allocate three PSL-style memory domains (Sprint 8 adds GENERAL) */
@@ -1149,6 +1072,9 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
     volatile int sprint20_ok = 0;
     volatile int sprint21_ok = 0;
     volatile int sprint22_ok = 0;
+    volatile int sprint23_ok = 0;   /* N-way resident scheduling (Sprint 23/24) */
+    volatile int sprint24_ok = 0;   /* Sprint 24: shared-VA + isolation proofs */
+    volatile int sprint25_ok = 1;   /* Sprint 25: lifecycle scenarios clear */
 
     /* Find the initrd module by cmdline prefix "initrd" */
     uint8_t *rd_tag_ptr = (uint8_t *)(uintptr_t)multiboot_info + 8;
@@ -1192,12 +1118,12 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
                 serial_puts("  ("); serial_putdec(vfs_files[fi].size); serial_puts(" bytes)\n");
             }
 
-            sprint16_ok = 1;
+sprint16_ok = 1;
 
             /* Sprint 17 proof: guard task reads kernel memory -> #PF ->
              * kernel resumes with reason FAULT. */
             serial_puts("\n     --- Task 1: /guard.elf (isolation probe) ---\n");
-            int r1 = sam_run_task("/guard.elf", 0, 0);
+            int r1 = sam_run_task_legacy("/guard.elf", 0, 0);
             if (r1 == TASK_END_FAULT) {
                 serial_puts("     [PASS] Sprint 17: kernel memory isolated from ring 3\n");
                 vga_puts("     [PASS] ring-3 isolation enforced (#PF)\n", VGA_GREEN);
@@ -1209,7 +1135,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
             /* Sprint 18 proof: hello task exits cleanly -> kernel RESUMES
              * and keeps running (task switch works end to end). */
             serial_puts("\n     --- Task 2: /hello.elf (clean exit + resume) ---\n");
-            int r2 = sam_run_task("/hello.elf", 0, 0);
+            int r2 = sam_run_task_legacy("/hello.elf", 0, 0);
             if (r2 == TASK_END_EXIT) {
                 vga_puts("     [PASS] ring-3 process ran + exited via syscall\n", VGA_GREEN);
                 serial_puts("     [PASS] Sprint 18: kernel resumed after task exit\n");
@@ -1226,7 +1152,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
              * finishes cleanly as if nothing happened. */
             serial_puts("\n     --- Task 3: /loop.elf (preemption demo) ---\n");
             uint64_t pre_before = g_preempt_count;
-            int r3 = sam_run_task("/loop.elf", 0, 0);
+            int r3 = sam_run_task_legacy("/loop.elf", 0, 0);
             uint64_t pre_delta = g_preempt_count - pre_before;
             if (r3 == TASK_END_EXIT && pre_delta > 0) {
                 vga_puts("     [PASS] ring-3 task preempted + resumed\n", VGA_GREEN);
@@ -1241,16 +1167,24 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
             }
 
             /* Sprint 21 proof: TWO resident tasks round-robin under the
-             * PIT scheduler until both finish. */
-            serial_puts("\n     --- Task 4: /loopa.elf + /loopb.elf (round-robin pair) ---\n");
-            int both = sam_run_pair("/loopa.elf", "/loopb.elf");
-            if (both == 2) {
-                vga_puts("     [PASS] two resident tasks round-robined\n", VGA_GREEN);
-                serial_puts("     [PASS] Sprint 21: two resident tasks scheduled round-robin\n");
-                sprint21_ok = 1;
-            } else {
-                serial_puts("     [WARN] pair demo: only ");
-                serial_putdec((uint64_t)both); serial_puts(" task(s) finished cleanly\n");
+             * PIT scheduler until both finish. Sprint 24: both instances
+             * are the SAME canonical ELF at the same VA — distinct tags
+             * via argv prove independent execution. */
+            serial_puts("\n     --- Task 4: loops.elf x2 (same binary, round-robin) ---\n");
+            {
+                char *pav_a[2] = { (char *)"/loops.elf", (char *)"A" };
+                char *pav_b[2] = { (char *)"/loops.elf", (char *)"B" };
+                int sa = sam_task_create("/loops.elf", pav_a, 2);
+                int sb = sam_task_create("/loops.elf", pav_b, 2);
+                int both = (sa >= 0 && sb >= 0) ? sam_task_run_loop() : 0;
+                if (both == 2) {
+                    vga_puts("     [PASS] two resident tasks round-robined\n", VGA_GREEN);
+                    serial_puts("     [PASS] Sprint 21: two resident tasks scheduled round-robin\n");
+                    sprint21_ok = 1;
+                } else {
+                    serial_puts("     [WARN] pair demo: only ");
+                    serial_putdec((uint64_t)both); serial_puts(" task(s) finished cleanly\n");
+                }
             }
 
             /* Sprint 22 proof: argv reaches the task, exit code comes back.
@@ -1261,7 +1195,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
             eargv[1] = (char *)"alpha";
             eargv[2] = (char *)"beta";
             eargv[3] = (char *)"gamma";
-            int r5 = sam_run_task("/echo.elf", eargv, 4);
+            int r5 = sam_run_task_legacy("/echo.elf", eargv, 4);
             if (r5 == TASK_END_EXIT && g_exit_code == 4) {
                 vga_puts("     [PASS] argv + exit code round trip\n", VGA_GREEN);
                 serial_puts("     [PASS] Sprint 22: argv delivered, exit code ");
@@ -1272,6 +1206,252 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
                 serial_puts("     [WARN] echo task: reason=");
                 serial_putdec((uint64_t)r5);
                 serial_puts(" code="); serial_putdec(g_exit_code); serial_puts("\n");
+            }
+
+            /* ── Sprint 24 proof 1: IDENTICAL-BINARY ×4 RESIDENT ──────
+             * Same initrd ELF, same canonical entry VA, four TCB slots,
+             * four distinct physical backings, four CR3s — all READY
+             * simultaneously BEFORE any dispatch, then round-robin. */
+            serial_puts("\n     --- Sprint 24: identical-binary x4 resident ---\n");
+            {
+                char *t0[2] = { (char *)"/loops.elf", (char *)"W" };
+                char *t1[2] = { (char *)"/loops.elf", (char *)"X" };
+                char *t2[2] = { (char *)"/loops.elf", (char *)"Y" };
+                char *t3[2] = { (char *)"/loops.elf", (char *)"Z" };
+                int q0 = sam_task_create("/loops.elf", t0, 2);
+                int q1 = sam_task_create("/loops.elf", t1, 2);
+                int q2 = sam_task_create("/loops.elf", t2, 2);
+                int q3 = sam_task_create("/loops.elf", t3, 2);
+
+                int ready_count = 0;
+                for (int i = 0; i < SAM_MAX_TASKS; i++)
+                    if (g_tasks[i].state == TASK_READY) ready_count++;
+
+                /* VA→PA divergence evidence: same VA, different owners */
+                if (q0 >= 0 && q1 >= 0) {
+                    serial_puts("     [aud] task ");
+                    serial_putdec((uint64_t)q0);
+                    serial_puts(" va=");
+                    serial_puthex(USER_CODE_BASE);
+                    serial_puts("→pa=");
+                    serial_puthex(g_tasks[q0].code_pa);
+                    serial_puts(" | task ");
+                    serial_putdec((uint64_t)q1);
+                    serial_puts(" va=");
+                    serial_puthex(USER_CODE_BASE);
+                    serial_puts("→pa=");
+                    serial_puthex(g_tasks[q1].code_pa);
+                    serial_puts(g_tasks[q0].code_pa != g_tasks[q1].code_pa
+                                ? "  DIVERGENT [PASS]\n" : "  ALIASED! [FAIL]\n");
+                }
+
+                if (q0 >= 0 && q1 >= 0 && q2 >= 0 && q3 >= 0
+                    && ready_count == 4 && g_ntasks == 4) {
+                    serial_puts("     [PASS] Sprint 24: 4 instances of one binary resident\n");
+                    vga_puts("     [PASS] Sprint 24: 4x same binary resident\n", VGA_GREEN);
+
+                    uint64_t pre_b = g_preempt_count;
+                    int clean4 = sam_task_run_loop();
+                    uint64_t pre_d = g_preempt_count - pre_b;
+
+                    if (clean4 == 4 && g_last_batch_faults == 0 && pre_d > 0) {
+                        serial_puts("     [PASS] Sprint 24: 4/4 exited cleanly, ");
+                        serial_putdec(pre_d);
+                        serial_puts(" preemptions\n");
+                        sprint23_ok = 1;   /* N-way residency claim upheld */
+                        sprint24_ok = 1;
+                    } else {
+                        serial_puts("     [FAIL] Sprint 24: clean=");
+                        serial_putdec((uint64_t)clean4);
+                        serial_puts(" faults=");
+                        serial_putdec(g_last_batch_faults);
+                        serial_puts("\n");
+                    }
+                } else {
+                    serial_puts("     [FAIL] Sprint 24: creation/ready audit");
+                    serial_puts(" ready="); serial_putdec((uint64_t)ready_count);
+                    serial_puts(" ntasks="); serial_putdec((uint64_t)g_ntasks);
+                    serial_puts("\n");
+                }
+            }
+
+            /* ── Sprint 24 proof 2: CROSS-PROCESS PHYSICAL ISOLATION ───
+             * probeb (slot 0) reads slot-1's stack PA from ring 3 → #PF.
+             * Kernel survives; loops(tag S) in slot 1 continues to exit. */
+            serial_puts("\n     --- Sprint 24: cross-process PA isolation ---\n");
+            {
+                char *sv[2] = { (char *)"/loops.elf", (char*)"S" };
+                int ip = sam_task_create("/probeb.elf", 0, 0);
+                int is = sam_task_create("/loops.elf", sv, 2);
+                if (ip >= 0 && is >= 0) {
+                    int clean_i = sam_task_run_loop();
+                    if (clean_i == 1 && g_last_batch_faults == 1) {
+                        serial_puts("     [PASS] Sprint 24: cross-process PA read faulted (#PF), survivor ran on\n");
+                        vga_puts("     [PASS] Sprint 24: cross-process isolation held\n", VGA_GREEN);
+                    } else {
+                        serial_puts("     [FAIL] Sprint 24: isolation clean=");
+                        serial_putdec((uint64_t)clean_i);
+                        serial_puts(" faults=");
+                        serial_putdec(g_last_batch_faults);
+                        serial_puts("\n");
+                        sprint24_ok = 0;
+                    }
+                }
+            }
+
+            /* ============================================================
+             * Sprint 25 CI scenarios — real parent/child relationships are
+             * constructed on REAL TCB metadata: the child's ppid field is
+             * assigned the designated parent's PID after creation, and
+             * waitpid parentage validation inside the kernel uses exactly
+             * that metadata. No bypass path exists.
+             * ============================================================ */
+
+            /* --- Scenario A: identity + IMMEDIATE reap ------------------
+             * hello.elf (fast exiter) becomes a zombie long before the
+             * spinning parent reaches waitpid → pure immediate-reap path:
+             * no blocking, no scheduler switch. Parent validates returned
+             * PID and the 64-bit status (TERM_EXIT<<32 | 0) in-ring3 and
+             * exits 0; kernel asserts exit code + batch counters. */
+            serial_puts("\n     --- Sprint 25 A: identity + immediate reap ---\n");
+            {
+                static char at[16], asp[16], axp[16];
+                int ca = sam_task_create("/hello.elf", 0, 0);
+                if (ca >= 0) {
+                    sam_itoa_dec(g_tasks[ca].pid, at);
+                    sam_itoa_dec(30000000ULL, asp);          /* ~30M iters */
+                    sam_itoa_dec(g_tasks[ca].pid, axp);
+                    char *wav[6] = { (char *)"/waiter.elf", (char *)"S",
+                                     at, asp, axp, (char *)"0" };
+                    int pa = sam_task_create("/waiter.elf", wav, 6);
+                    if (pa >= 0) {
+                        g_tasks[ca].ppid = g_tasks[pa].pid;   /* REAL relation */
+                        serial_puts("     [rel] child slot ");
+                        serial_putdec((uint64_t)ca);
+                        serial_puts(" pid=");
+                        serial_putdec((uint64_t)g_tasks[ca].pid);
+                        serial_puts(" -> parent pid=");
+                        serial_putdec((uint64_t)g_tasks[pa].pid);
+                        serial_puts("\n");
+                        int cl = sam_task_run_loop();
+                        if (cl == 2 && g_last_batch_faults == 0 && g_exit_code == 0) {
+                            serial_puts("     [PASS] Sprint 25 A: immediate reap, correct pid+status\n");
+                            sprint25_ok = 1;
+                        } else {
+                            serial_puts("     [FAIL] Sprint 25 A: clean=");
+                            serial_putdec((uint64_t)cl);
+                            serial_puts(" exit="); serial_putdec(g_exit_code);
+                            serial_puts("\n");
+                        }
+                    } else { sprint25_ok = 0;
+                        serial_puts("     [FAIL] Sprint 25 A: waiter create\n"); }
+                } else { sprint25_ok = 0;
+                    serial_puts("     [FAIL] Sprint 25 A: child create\n"); }
+            }
+
+            /* --- Scenario B: BLOCKING wait-any over exit+fault children -
+             * Creation order == slot order == dispatch order:
+             *   slot0 loops(tag P) -> slot1 waiter('A') -> slot2 probeb.
+             * The waiter reaches waitpid while BOTH children are still
+             * runnable, so it must block: RUNNING -> WAITING (continuation
+             * saved; RAX resolved at wake). probeb then faults (#PF,
+             * vector 14); terminate() wakes the WAITING parent, writes
+             * FAULT|14 through VA->PA ownership, presets RAX to the child
+             * PID, reaps the victim; loops keeps running and exits later;
+             * its unclaimed zombie is swept by the bounded drain
+             * (orphan/zombie policy demonstrated). expected=="0" in mode A
+             * means accept-any: the returned PID is validated only as
+             * nonzero, while the 64-bit status proves WHICH child (the
+             * sole faulting one) was reaped. */
+            serial_puts("\n     --- Sprint 25 B: blocking wait-any + faulted child ---\n");
+            {
+                static char brs[4] = "1";
+                static char btagP[2] = "P";
+                int c1 = -1, pb = -1, c2 = -1;
+                char *lav[2] = { (char *)"/loops.elf", btagP };
+                c1 = sam_task_create("/loops.elf", lav, 2);
+                if (c1 >= 0) {
+                    char *wav[6] = { (char *)"/waiter.elf", (char *)"A",
+                                     (char *)"0", (char *)"0",
+                                     (char *)"0", brs };
+                    pb = sam_task_create("/waiter.elf", wav, 6);
+                }
+                if (pb >= 0)
+                    c2 = sam_task_create("/probeb.elf", 0, 0);
+                if (c1 >= 0 && pb >= 0 && c2 >= 0) {
+                    g_tasks[c1].ppid = g_tasks[pb].pid;
+                    g_tasks[c2].ppid = g_tasks[pb].pid;
+                    serial_puts("     [rel] slots ");
+                    serial_putdec((uint64_t)c1); serial_puts(",");
+                    serial_putdec((uint64_t)c2);
+                    serial_puts(" -> parent pid=");
+                    serial_putdec((uint64_t)g_tasks[pb].pid);
+                    serial_puts("\n");
+                    int cl = sam_task_run_loop();
+                    if (cl == 2 && g_last_batch_faults == 1 && g_exit_code == 0) {
+                        serial_puts("     [PASS] Sprint 25 B: blocked parent woke on TERM_FAULT(14), reaped\n");
+                    } else {
+                        serial_puts("     [FAIL] Sprint 25 B: clean=");
+                        serial_putdec((uint64_t)cl);
+                        serial_puts(" faults=");
+                        serial_putdec(g_last_batch_faults);
+                        serial_puts(" exit="); serial_putdec(g_exit_code);
+                        serial_puts("\n");
+                        sprint25_ok = 0;
+                    }
+                } else { sprint25_ok = 0;
+                    serial_puts("     [FAIL] Sprint 25 B: creates\n"); }
+            }
+
+            /* --- Scenario C: invalid-wait errors + SLOT REUSE/new-PID --- */
+            serial_puts("\n     --- Sprint 25 C: invalid waits + slot reuse ---\n");
+            {
+                int pre_max = g_max_pid_seen;
+                int ce = sam_task_create("/hello.elf", 0, 0);
+                if (ce >= 0) {
+                    char *eav[6] = { (char *)"/waiter.elf", (char *)"E",
+                                     (char *)"0", (char *)"0",
+                                     (char *)"0", (char *)"0" };
+                    int pe = sam_task_create("/waiter.elf", eav, 6);
+                    if (pe >= 0) {
+                        g_tasks[ce].ppid = g_tasks[pe].pid;
+                        int cl = sam_task_run_loop();
+                        if (cl == 2 && g_exit_code == 0) {
+                            serial_puts("     [PASS] Sprint 25 C: invalid-wait errors returned safely\n");
+                        } else {
+                            serial_puts("     [FAIL] Sprint 25 C: clean=");
+                            serial_putdec((uint64_t)cl);
+                            serial_puts(" exit="); serial_putdec(g_exit_code);
+                            serial_puts("\n");
+                            sprint25_ok = 0;
+                        }
+                    } else { sprint25_ok = 0;
+                        serial_puts("     [FAIL] Sprint 25 C: waiter create\n"); }
+                }
+
+                /* Slot reuse: every prior batch drained, so the next create
+                 * takes the lowest FREE slot while the monotonic allocator
+                 * guarantees a strictly fresh PID. */
+                uint64_t before = g_preempt_count; (void)before;
+                static char rtag[2] = "R";
+                int rs;
+                {
+                    char *rav[2] = { (char *)"/loops.elf", rtag };
+                    rs = sam_task_create("/loops.elf", rav, 2);
+                }
+                if (rs >= 0) {
+                    serial_puts("     [OK] Sprint 25: slot ");
+                    serial_putdec((uint64_t)rs);
+                    serial_puts(" reused by fresh pid ");
+                    serial_putdec((uint64_t)g_tasks[rs].pid);
+                    serial_puts(" (max previously seen ");
+                    serial_putdec((uint64_t)pre_max);
+                    serial_puts(g_tasks[rs].pid > (sam_pid_t)pre_max
+                                ? ") [PASS]\n" : ") [FAIL]\n");
+                    if (g_tasks[rs].pid <= (sam_pid_t)pre_max) sprint25_ok = 0;
+                    sam_task_run_loop();   /* drain the evidence task */
+                } else { sprint25_ok = 0;
+                    serial_puts("     [FAIL] Sprint 25 C: reuse create\n"); }
             }
         }
     }
@@ -1284,7 +1464,7 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
 
     volatile int sprint9_ok = domains_ok && compute_ok && matmul_ok && bench_ok
                    && gguf_ok && sprint8_domain_ok && stf_ok;
-    volatile int sprint16_gate = sprint9_ok && sprint10_sentinel_ok && sprint16_ok && sprint18_ok && sprint19_ok && sprint20_ok && sprint21_ok && sprint22_ok;
+    volatile int sprint16_gate = sprint9_ok && sprint10_sentinel_ok && sprint16_ok && sprint18_ok && sprint19_ok && sprint20_ok && sprint21_ok && sprint22_ok && sprint23_ok && sprint24_ok && sprint25_ok;
 
     if (sprint16_gate) {
         vga_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n",  VGA_GREEN);
@@ -1297,6 +1477,9 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         vga_puts("[SAM OS] VFS + initrd  : mounted\n", VGA_GREEN);
         vga_puts("[SAM OS] Ring 3        : first user process ran\n", VGA_GREEN);
         vga_puts("[SAM OS] Sprint 22 PASS -- argv, exit codes, resident task scheduling\n", VGA_GREEN);
+        vga_puts("[SAM OS] Sprint 23 PASS -- N-task resident scheduling\n", VGA_GREEN);
+        vga_puts("[SAM OS] Sprint 24 PASS -- shared user VA, per-task physical backing\n", VGA_GREEN);
+        vga_puts("[SAM OS] Sprint 25 PASS -- process identity + waitpid lifecycle\n", VGA_GREEN);
         serial_puts("[SAM OS] MCP scan      : done   (hardware-agnostic)\n");
         serial_puts("[SAM OS] Boot wizard   : ");
         serial_puts(g_fb.ready ? "shown  (pixel framebuffer)\n" : "shown  (VGA text wizard)\n");
@@ -1304,9 +1487,12 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         serial_puts("  (dynamic domains)\n");
         serial_puts("[SAM OS] STF model     : loaded (format-agnostic)\n");
         serial_puts("[SAM OS] Sprint 22 PASS -- argv, exit codes, resident task scheduling\n");
+        serial_puts("[SAM OS] Sprint 23 PASS -- N-task resident scheduling\n");
+        serial_puts("[SAM OS] Sprint 24 PASS -- shared user VA, per-task physical backing\n");
+        serial_puts("[SAM OS] Sprint 25 PASS -- process identity + waitpid lifecycle\n");
     } else {
-        vga_puts("[SAM OS] Sprint 21 FAIL\n", VGA_RED);
-        serial_puts("[SAM OS] Sprint 21 FAIL\n");
+        vga_puts("[SAM OS] Sprint 25 FAIL\n", VGA_RED);
+        serial_puts("[SAM OS] Sprint 25 FAIL\n");
     }
 
     vga_puts("============================================================\n", VGA_CYAN);

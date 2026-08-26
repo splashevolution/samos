@@ -85,10 +85,10 @@ VFS over initrd, `int 0x80` syscall ABI, ring 3 **with hardware-enforced memory
 isolation** (per-task CR3, Sprint 17).
 
 **The realistic ladder to "laptop OS" (in order, no skipping):**
-1. Task switching + preemption (Sprints 18–19)
+1. Task switching + preemption (Sprints 20–21); N-task shared-VA residency (Sprints 22–24)
 2. Writable filesystem; full storage drivers (ATA write → AHCI → NVMe)
 3. SMP: application-processor startup, per-CPU scheduler queues
-4. Real userland: ELF loader, minimal libc, shell as a normal process
+4. Real userland: process lifecycle (wait/parent-child), minimal libc, shell as a normal process
 5. Network stack (NIC driver → TCP/IP)
 6. GUI beyond the framebuffer
 

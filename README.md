@@ -8,7 +8,7 @@ A bare-metal x86-64 research kernel exploring CPU-only AI inference and retro ga
 
 > **Why?** Millions of capable machines are abandoned by vendor-locked update cycles while AI demand inflates hardware prices. SAM OS revives them as sovereign, on-device AI appliances. See [VISION.md](VISION.md) — including the Make-in-India alignment.
 
-> **Status: Research prototype, Sprint 22.** Boot → graphical OOBE wizard → interactive kernel shell → run ELF programs in isolated ring 3. What works today is real. What comes next is clearly labelled — see the [honest platform-maturity table](VISION.md#honest-maturity-are-we-a-laptopdesktopmobileserver-os-yet).
+> **Status: Research prototype, Sprint 24.** Boot → graphical OOBE wizard → interactive kernel shell → run ELF programs in isolated ring 3. N resident tasks share one canonical user virtual layout; each has its own CR3 and physical backing. What works today is real. What comes next is clearly labelled — see the [honest platform-maturity table](VISION.md#honest-maturity-are-we-a-laptopdesktopmobileserver-os-yet).
 
 ---
 
@@ -20,7 +20,7 @@ A Core i5 with SSE4.2 can do meaningful INT8 matrix math in bare-metal mode. Nob
 
 ---
 
-## What Exists Today (Sprint 22)
+## What Exists Today (Sprint 24)
 
 - **Multiboot2 boot** — GRUB2 → 64-bit long mode, identity-mapped 4 GiB, SSE/FPU initialised
 - **Graphical OOBE wizard** — 1024×768 pixel GUI (Bochs VBE direct I/O), dark sidebar, hostname/WiFi setup
@@ -31,13 +31,14 @@ A Core i5 with SSE4.2 can do meaningful INT8 matrix math in bare-metal mode. Nob
 - **Real hardware** — ACPI table parsing (RSDP/RSDT/XSDT/MADT), IRQ-driven PS/2 keyboard, ATA PIO disk read, full PCI scan (Sprint 15)
 - **Kernel shell** — PS/2 keyboard, `help`, `cpu`, `mem`, `res`, `run`, `setup`, `reboot`
 - **STF model format** — synthetic tensor loader for AI domain; proof-of-concept, not real inference
-- **App model (Sprints 16–19)** 🆕
+- **App model (Sprints 16–24)** 🆕
   - initrd (ustar) VFS mounted from a GRUB module
   - `int 0x80` syscall ABI: `write(fd, buf, len)`, `exit(code)`, `read(fd, buf, len)`
   - Ring 3 with **hardware memory isolation**: each task runs in its own address space (per-task CR3); kernel memory is supervisor-only and any ring-3 access to it faults
-  - ELF64 loader (static ET_EXEC, segments validated against the user region)
+  - ELF64 loader (static ET_EXEC, canonical-VA validated)
   - PIT preemption (100 Hz) with transparent resume (Sprint 20)
-  - **Round-robin scheduling of two resident tasks** — independent address spaces, time-sliced by the timer (Sprint 21)
+  - **Fixed-capacity N-task kernel** (16 slots): explicit FREE/READY/RUNNING/ZOMBIE states, generic create + round-robin run/drain loop (Sprint 23)
+  - **Shared user virtual address space** (Sprint 24): every process sees the same user VA layout; each CR3 maps it to slot-owned physical backing (`code_pa = 0x19000000 + k·4 MiB`). One ET_EXEC binary runs simultaneously in multiple slots; cross-process physical reads fault (#PF); E820-derived runtime capacity for legacy boards with RAM holes
   - **argv + exit codes** — programs receive arguments on their stack; `run echo.elf alpha beta` reports the exit code (Sprint 22)
   - Shell command `run hello.elf` loads and runs an initrd program in ring 3
 
@@ -50,7 +51,9 @@ SAM> run hello.elf
 SAM> run guard.elf        # deliberately touches kernel memory → #PF → isolation held
 ```
 
-**Not present yet:** multiple resident tasks (one runnable ring-3 task at a time — round-robin switching is Sprint 21), filesystem writeback, storage driver integration with VFS (ATA read is standalone), network stack, real model inference, dynamic linking/PIE, argv.
+At boot the CI sequence runs four simultaneous instances of one binary plus a cross-process isolation probe — see `make test`.
+
+**Not present yet:** `waitpid`/parent-child semantics, background jobs, filesystem writeback, storage driver integration with VFS (ATA read is standalone), network stack, real model inference, dynamic linking/PIE, VMM page-table reclamation (~12 KiB leaked per created address space), SMP.
 
 ---
 
