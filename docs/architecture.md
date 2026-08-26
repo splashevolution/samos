@@ -247,8 +247,10 @@ virtual addresses (`pa2va_delta = stack_pa − USER_STACK_BASE`).
 | **20** | 2026-08-24 | PIT Preemption | 100 Hz timer; 3-tick quantum; full register snapshot + transparent resume |
 | **21** | 2026-08-24 | Round-Robin 2 Tasks | Two resident tasks, separate CR3, interleaved output [A]1 [A]2 [B]1 [B]2... |
 | **22** | 2026-08-24 | argv + Exit Codes | SysV stack layout (argc/argv); echo.elf prints args, exits with argc |
-| **23** | 2026-08-25 | N-Task Kernel | 16-slot FREE/READY/RUNNING/ZOMBIE table; generic create + run/drain loop; E820 per-create validation |
+| **23** | 2026-08-25 | N-Task Kernel | 16-slot FREE/READY/RUNNING/WAITING/ZOMBIE table; generic create + run/drain loop; E820 per-create validation |
 | **24** | 2026-08-25 | Shared User VA | Canonical user VA in every CR3 → slot-owned PA backing; one binary ×4 resident; cross-process #PF probe; E820 capacity discovery |
+| **25** | 2026-08-25 | Process Identity & waitpid | PID/PPID on TCB metadata; blocking waitpid via syscall-context switch; wake-and-reap; SAM-native status encoding |
+| **25H** | 2026-08-26 | Boundary/Context Hardening | WRITE validation + length cap; CPL3 containment for all sync faults; transactional create w/ rollback injection test; exact accounting helper; two-pass hardened ELF loader + malformed fixtures; backing zeroization; IF invariant at await point; **FPU/SIMD context: eager trap-entry save, same-context tail reload, restore-in-resume adjacent iretq**; verdict binding (exit-PID/reap counters); post-churn integrity proof |
 
 ---
 

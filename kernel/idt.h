@@ -2,7 +2,10 @@
  * SAM OS — kernel/idt.h
  * Sprint 14: Interrupt Descriptor Table — all 32 CPU exception vectors
  *
- * Architecture: x86-64, ring 0 only, no user mode yet.
+ * Architecture: x86-64, ring 3 user mode over a ring-0 kernel (since Sprint 16).
+ * Sprint 25H: _isr_common eagerly saves the interrupted task's extended
+ * FPU/SIMD context on every ring-3 trap and reloads it on same-context
+ * return; switch paths reload inside sam_user_resume adjacent to iretq.
  *
  * Design:
  *   - 256-entry IDT (32 CPU exceptions + 224 unused, all pointing to a

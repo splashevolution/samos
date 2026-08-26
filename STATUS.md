@@ -756,7 +756,41 @@ batch-drain sweep frees everything).
 
 ---
 
-## Roadmap
+### Sprint 25H — Hardening: Kernel Boundary, Lifecycle & Context ✅
+**Date**: 2026-08-26
+**Goal**: Close every P0/P1 from the three-audit correctness review before any userspace process creation.
+
+**Landed**:
+- **IF/orchestrator invariant**: interrupt gates clear IF; `__builtin_longjmp` does not restore flags. The await point now restores IF once (`sam_orchestrator_irq_restore`) after kernel-CR3 re-entry. Proven: post-churn check asserts IF=1 **and** PIT ticks advance in orchestrator context.
+- **User-memory boundary**: `SAM_SYS_WRITE` validates fd, caps length (`SAM_WRITE_MAX`), rejects non-canonical/cross-region/overflow ranges via subtraction-form checks (`sam_uva_range_ok`). Adversarial probes (kernel ptr, boundary crossing, overflow addr, huge len, supervisor hole, zero len) all return SAM-native errors; never serial-dumps kernel memory.
+- **CPL3 containment**: #DE/#DB/#BP/#OF/#BR/#UD/#NM/#TS/#NP/#SS/#GP/#PF/#MF/#AC/#XM raised at CPL 3 terminate ONLY the offending task (`TERM_FAULT`, code=vector). NMI/#DF/MCE remain fatal; CPL0 faults unchanged. CI proves vectors 0/6/13 contained with survivor + parent reap.
+- **Back zeroization**: entire deterministic backing cleared before load/build; remanence canary test proves successor sees nothing.
+- **Transactional create**: PD-audit failure now rolls back to FREE with unchanged accounting (deterministic injection test); single publish point FREE→READY.
+- **Exact accounting**: every TCB state write goes through `sam_task_set_state()`; continuous consistency checker runs at each reap and drain.
+- **ELF loader**: two-pass validate→copy; subtraction-form bounds everywhere; rejects filesz>memsz(-5), entry outside exec segment(-6), overlapping PT_LOAD(-7), wrap/geometry attacks. Six generated malformed fixtures all rejected.
+- **FPU/SIMD context (the deep one)**: kernel C clobbers caller-saved XMM on ANY trap serving ring 3 — even a no-op tick. Now preserved via eager per-slot save in `_isr_common` (pre-C), same-context tail reload, and restore inside `sam_user_resume` immediately before `iretq`; virgin tasks get initialized FCW/MXCSR. FXSAVE path on qemu64; XSAVE auto-selected where OSXSAVE exists (same asm family). Dual-task preemption exchange test passes repeatedly (single-task isolation variant used during debugging).
+- **Verdict integrity**: `g_exit_pid` + `g_reap_count` bind scenario verdicts to specific tasks/reaps instead of last-writer exit codes; several test binaries signal disagreement via contained #UD so batch fault counters see failures.
+
+**Debugging war stories (kept)**:
+1. `_isr_common` insertion left duplicate label+pop triples → every trap shifted RSP by 24–48 bytes → frame garbage presenting as #MF/RIP=0x3 then #DF. Found by disassembling current vs checkpoint-40efc57 stubs.
+2. A multi-line C comment without `\` continuations inside the macro terminated it early; builds "succeeded" against stale objects for cycles. Lesson: verify linked binaries, not source intent.
+3. The ticking timer was never dead: harness cached async-modified `g_tick_count`; global is now `volatile`.
+
+**Boot evidence (25H battery, all PASS)**:
+```
+[PASS] 25H: injected audit failure rolled back cleanly
+[PASS] 25H: all 6 malformed ELFs rejected
+[PASS] 25H: write() boundary probes passed
+[PASS] 25H: CPL3 vector {0,6,13} contained; survivor ran; parent reaped FAULT   ×3
+[PASS] 25H: reused backing exposes no predecessor data
+[PASS] 25H: XMM context preserved across preemptions (A+B)
+[PASS] 25H post-churn: sentinels OK, IF=1, PIT live (+7 ticks), isolation re-proven
+[OK]   25H VMM pool remaining 3664 KiB of 4096 KiB (12 KiB leaked per address space)
+```
+
+**Honest scope**: VMM page-table leak retained (~12 KiB/address space); waitpid remains single-waiter-per-child; argv stays bounded by producer discipline (shell line ≤79 B ⇒ ≤8 args); no spawn/fork/execve/jobs/signals; XSAVE-class path validated by construction+qemu FXSAVE coverage, AVX hardware soak deferred.
+
+---
 
 See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 
@@ -765,7 +799,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 6-phase plan.
 | 1 — Truth stabilization | Docs accurate, reproducible build, `make test` | ✅ Done |
 | 2 — Kernel safety | Exception handlers, panic, E820 validation | ✅ Done (Sprint 14) |
 | 3 — Hardware | ACPI, PS/2 IRQ keyboard, ATA PIO disk | ✅ Done (Sprint 15); full PCI scan + USB HID remain |
-| 4 — App model | VFS, initrd, syscall ABI, ring-3 process, N-task scheduling | 🔄 In progress; Sprints 16–25 done (VFS, syscalls, CR3 isolation, task switch, ELF loader, shell `run`, PIT preemption, round-robin, argv+exit codes, N-task table, shared-VA multi-process, PID/PPID + blocking waitpid). Next: spawn-shaped creation, writable FS |
+| 4 — App model | VFS, initrd, syscall ABI, ring-3 process, N-task scheduling | 🔄 In progress; Sprints 16–25 done + **25H hardening** (boundary validation, CPL3 containment, transactional create, exact accounting, hardened two-pass ELF loader, FPU/SIMD context preservation, backing zeroization). Next: spawn-shaped creation (now unblocked), writable FS |
 | 5 — Inference | Real model end-to-end on bare metal | Future |
 | 6 — Compatibility | SAM ABI → Lua → WASM → Linux compat | Far future |
 

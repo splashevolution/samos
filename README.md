@@ -8,7 +8,7 @@ A bare-metal x86-64 research kernel exploring CPU-only AI inference and retro ga
 
 > **Why?** Millions of capable machines are abandoned by vendor-locked update cycles while AI demand inflates hardware prices. SAM OS revives them as sovereign, on-device AI appliances. See [VISION.md](VISION.md) — including the Make-in-India alignment.
 
-> **Status: Research prototype, Sprint 24.** Boot → graphical OOBE wizard → interactive kernel shell → run ELF programs in isolated ring 3. N resident tasks share one canonical user virtual layout; each has its own CR3 and physical backing. What works today is real. What comes next is clearly labelled — see the [honest platform-maturity table](VISION.md#honest-maturity-are-we-a-laptopdesktopmobileserver-os-yet).
+> **Status: Research prototype, Sprint 25H (hardened).** Boot → graphical OOBE wizard → interactive kernel shell → run ELF programs in isolated ring 3. N resident tasks share one canonical user virtual layout with per-task CR3 + physical backing; syscalls validate user memory; CPL3 faults contain per-process; FPU/SIMD context is preserved across preemption. What works today is real. What comes next is clearly labelled — see the [honest platform-maturity table](VISION.md#honest-maturity-are-we-a-laptopdesktopmobileserver-os-yet).
 
 ---
 
