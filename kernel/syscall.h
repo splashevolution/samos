@@ -131,6 +131,60 @@ void *g_task_jb[5];
 uint64_t g_last_batch_faults = 0;  /* Sprint 24: #PF-ended tasks in last drain */
 sam_pid_t g_next_pid = 1;          /* Sprint 25: monotonic PID counter        */
 int g_max_pid_seen = 0;            /* Sprint 25: slot-reuse/new-PID evidence  */
+int g_acct_broken = 0;             /* Sprint 25H: set if accounting ever drifts */
+int g_inject_audit_fail_once = 0;  /* Sprint 25H: deterministic create-failure hook */
+int g_pit_live_fail = 0;           /* Sprint 25H: post-drain PIT liveness check */
+
+/* Sprint 25H error codes shared by syscalls taking user memory */
+#define SYS_E_BADFD   (-7)
+#define SYS_E_TOOBIG  (-8)
+#define SAM_WRITE_MAX 0x10000UL   /* 64 KiB per write() — finite by contract */
+
+/* ── Sprint 25H: exact task accounting ─────────────────────────────────
+ * THE single write path for TCB state. Keeps the frozen invariant
+ *   g_ntasks == number of slots whose state != TASK_FREE
+ * true through every transition (create publish, preemption, blocking,
+ * termination, wake-reap, immediate reap, drain). Lifecycle code must
+ * never assign .state directly again. */
+static void sam_task_set_state(int i, task_state_t s) {
+    task_state_t o = g_tasks[i].state;
+    if (o == s) return;
+    g_tasks[i].state = s;
+    if (o == TASK_FREE && s != TASK_FREE) g_ntasks++;
+    if (o != TASK_FREE && s == TASK_FREE) g_ntasks--;
+}
+
+/* Continuous consistency check — cheap (16 slots); called at every reap
+ * and at drain. Any drift is loud and sticky for CI verdicts. */
+static void sam_ntasks_sane(const char *at) {
+    int n = 0;
+    for (int i = 0; i < SAM_MAX_TASKS; i++)
+        if (g_tasks[i].state != TASK_FREE) n++;
+    if (n != g_ntasks) {
+        serial_puts("     [FAIL] 25H accounting drift at "); serial_puts(at);
+        serial_puts(" recorded="); serial_putdec((uint64_t)g_ntasks);
+        serial_puts(" actual=");   serial_putdec((uint64_t)n);
+        serial_puts("\n");
+        g_acct_broken = 1;
+        g_ntasks = n;             /* resynchronize; defect already reported */
+    }
+}
+
+/* Sprint 25H: orchestrator interrupt-state invariant.
+ * Interrupt gates clear IF on entry; __builtin_longjmp restores callee
+ * registers and PC but NOT RFLAGS, so a longjmp out of dispatch would
+ * otherwise leave the kernel orchestrator running with IF=0 forever —
+ * starving PIT ticks and hanging any HLT-based device wait (e.g.
+ * ps2_wait_char in the wizard path). The await point is THE boundary
+ * where orchestration resumes: restore IF there, exactly once. */
+static inline uint64_t sam_read_rflags(void) {
+    uint64_t f;
+    __asm__ volatile ("pushfq\n\tpopq %0" : "=r"(f));
+    return f;
+}
+static inline void sam_orchestrator_irq_restore(void) {
+    __asm__ volatile ("sti");
+}
 
 /* Sprint 21/23: prepare a task slot's initial user frame (first dispatch).
  * The frame RSP is set to the task's init_rsp (adjusted for argv), NOT the
@@ -163,7 +217,7 @@ static void sam_scheduler_tick(cpu_frame_t *f) {
 
         /* Save current task frame */
         g_tasks[g_cur].frame = *f;
-        g_tasks[g_cur].state = TASK_READY;   /* preempted task becomes READY */
+        sam_task_set_state(g_cur, TASK_READY);   /* preempted task becomes READY */
 
         /* Find next runnable task (skip ZOMBIE/FREE) */
         int next = -1;
@@ -181,7 +235,7 @@ static void sam_scheduler_tick(cpu_frame_t *f) {
             if (!g_tasks[next].started)
                 sam_task_mark_start(next);
             g_cur = next;
-            g_tasks[g_cur].state = TASK_RUNNING;
+            sam_task_set_state(next, TASK_RUNNING);
             serial_puts("     [tick] preempted, resuming task ");
             serial_putdec((uint64_t)next);
             serial_puts("\n");
@@ -190,7 +244,7 @@ static void sam_scheduler_tick(cpu_frame_t *f) {
         } else {
             /* next == g_cur (single runnable) or next == -1:
              * restore current to RUNNING — never leave g_cur READY. */
-            g_tasks[g_cur].state = TASK_RUNNING;
+            sam_task_set_state(g_cur, TASK_RUNNING);
         }
     }
 }
@@ -284,7 +338,7 @@ static int sam_pick_ready(int exclude) {
  * Mirrors exit code into g_exit_code so shell/Sprint-22 semantics hold. */
 static void sam_task_terminate(int vidx, uint32_t reason, uint64_t code) {
     sam_tcb_t *v = &g_tasks[vidx];
-    v->state       = TASK_ZOMBIE;
+    sam_task_set_state(vidx, TASK_ZOMBIE);
     v->term_reason = reason;
     v->exit_code   = code;
     g_exit_code    = code;
@@ -315,8 +369,9 @@ static void sam_task_terminate(int vidx, uint32_t reason, uint64_t code) {
             if (pa) *(volatile uint64_t *)(uintptr_t)pa = status;
         }
         p->frame.rax = (uint64_t)v->pid;
-        p->state     = TASK_READY;
-        v->state     = TASK_FREE;          /* reap only AFTER status/rax */
+        sam_task_set_state(w, TASK_READY);
+        sam_task_set_state(vidx, TASK_FREE);          /* reap only AFTER status/rax */
+        sam_ntasks_sane("wake-reap");
         break;
     }
 }
@@ -369,17 +424,31 @@ void sam_interrupt_dispatcher(cpu_frame_t *f) {
         return;
     }
 
-    /* Sprint 17/18/25: a page fault raised FROM RING 3 means the task
-     * touched memory it must not — isolation WORKING. Capture CR2 (the
-     * faulting linear address) as direct hardware evidence, run the
-     * unified termination bookkeeping, then resume the kernel. */
-    if (f->vector == 14 && (f->cs & 3) == 3) {
-        uint64_t cr2;
-        __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-        serial_puts("[OK] ring-3 access violation faulted (#PF) at ");
-        serial_puthex(f->rip); serial_puts("\n");
-        serial_puts("     [CR2] faulting linear address: ");
-        serial_puthex(cr2); serial_puts("\n");
+    /* Sprint 25H: CPL3 exception containment. Synchronous faults raised by
+     * ordinary ring-3 execution are PROCESS-LOCAL failures, not kernel
+     * corruption: terminate only the offending task via the Sprint 25
+     * model (ZOMBIE, TERM_FAULT, code=vector) and let survivors run.
+     *
+     * Recoverable from CPL3: #DE #DB #BP #OF #BR #UD #NM #TS #NP #SS #GP
+     * #PF #MF #AC #XM (#VE-reserved slot 20/22 kept fatal until used).
+     * ALWAYS fatal regardless of CPL: NMI(2), #DF(8), #MC(18) — genuine
+     * system-level events; recovering them would hide real corruption.
+     * Kernel-originated (CPL0) faults remain fatal — unchanged policy. */
+    if ((f->cs & 3) == 3 && f->vector < 32 &&
+        (f->vector != 2 && f->vector != 8 && f->vector != 18)) {
+        if (f->vector == 14) {   /* keep CR2 diagnostics on the common case */
+            uint64_t cr2;
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+            serial_puts("[OK] ring-3 access violation faulted (#PF) at ");
+            serial_puthex(f->rip); serial_puts("\n");
+            serial_puts("     [CR2] faulting linear address: ");
+            serial_puthex(cr2); serial_puts("\n");
+        } else {
+            serial_puts("[OK] ring-3 fault vector ");
+            serial_putdec((uint64_t)f->vector);
+            serial_puts(" contained at ");
+            serial_puthex(f->rip); serial_puts("\n");
+        }
         sam_task_terminate(g_cur, TERM_FAULT, f->vector);
         g_task_end_reason = TASK_END_FAULT;
         g_end_idx = g_cur;
@@ -395,14 +464,22 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
     switch (f->rax) {
 
     case SAM_SYS_WRITE: {
+        /* Sprint 25H boundary rules:
+         *  - fd must be 1 (COM1 serial stdout)
+         *  - zero length is valid and returns 0 without touching memory
+         *  - buffer must lie entirely inside the caller's canonical user
+         *    regions (subtraction-form range check; supervisor/kernel
+         *    addresses and region-crossing ranges are rejected)
+         *  - length is capped at SAM_WRITE_MAX so a malformed call can
+         *    never turn into unbounded (IF=0) kernel work or a serial
+         *    dump of arbitrary kernel memory */
         const char *buf = (const char *)f->rsi;
         uint64_t len = f->rdx;
-        /* fd is f->rdi; only stdout(1) supported, others -> error */
-        if (f->rdi != 1) { f->rax = (uint64_t)-1; break; }
-        if (!buf)        { f->rax = (uint64_t)-1; break; }
-        /* serial_puts/serial_putchar are static in main.c, which includes
-         * this header AFTER defining them. serial_putchar already expands
-         * '\n' to CR-LF. */
+        if (f->rdi != 1)            { f->rax = (uint64_t)(int64_t)SYS_E_BADFD;  break; }
+        if (len == 0)               { f->rax = 0; break; }
+        if (!buf || !sam_uva_range_ok((uint64_t)(uintptr_t)buf, len))
+                                    { f->rax = (uint64_t)(int64_t)WPID_E_BADPTR; break; }
+        if (len > SAM_WRITE_MAX)    { f->rax = (uint64_t)(int64_t)SYS_E_TOOBIG;  break; }
         for (uint64_t i = 0; i < len; i++)
             serial_putchar(buf[i]);
         f->rax = len;
@@ -489,7 +566,8 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
             serial_putdec((uint64_t)zomb);
             serial_puts(" freed)\n");
             f->rax = (uint64_t)v->pid;
-            v->state = TASK_FREE;
+            sam_task_set_state(zomb, TASK_FREE);
+            sam_ntasks_sane("immediate-reap");
             break;
         }
 
@@ -509,11 +587,11 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
         me->wait_target    = (spid < 0) ? SAM_WAIT_ANY : (uint32_t)spid;
         me->wait_status_va = sva;
         if (spid > 0) me->frame.rax = (uint64_t)(uint32_t)spid; /* preset  */
-        me->state          = TASK_WAITING;
+        sam_task_set_state(g_cur, TASK_WAITING);
 
         if (!g_tasks[nxt].started) sam_task_mark_start(nxt);
         g_cur = nxt;
-        g_tasks[nxt].state = TASK_RUNNING;
+        sam_task_set_state(nxt, TASK_RUNNING);
         serial_puts("     [run] successor task ");
         serial_putdec((uint64_t)nxt);
         serial_puts(" dispatched from syscall context\n");
@@ -610,6 +688,18 @@ static int sam_task_create(const char *name, char **argv, int argc) {
         return -1;   /* slot stays FREE, nothing consumed yet */
     }
 
+    /* ── Sprint 25H: sequential-confidentiality zeroization ────────────
+     * Clear the ENTIRE task-owned backing before any loader/builder
+     * touches it. A process reusing a slot must never observe a
+     * predecessor's stack data, argv strings, wait statuses, or code
+     * remnants. Done through the kernel identity map; also guarantees
+     * failed creations leave clean backing for the next occupant. */
+    {
+        volatile uint64_t *z = (volatile uint64_t *)(uintptr_t)code_pa;
+        uint64_t n = (TASK_PHYS_STRIDE / 8);
+        for (uint64_t i = 0; i < n; i++) z[i] = 0;
+    }
+
     /* Open and read ELF from initrd into GENERAL-domain staging scratch */
     vfs_file_handle_t h;
     if (vfs_open(name, &h) != 0) {
@@ -639,21 +729,33 @@ static int sam_task_create(const char *name, char **argv, int argc) {
         serial_puts("     [FAIL] vmm_create_user_as_pa: out of page-table pages\n");
         return -1;
     }
-    int aud = sam_audit_user_pd(user_cr3, code_pa, stack_pa);
 
-    /* ── argv: PHYSICAL write, VIRTUAL pointers (highest-risk path) ──
-     * Builder writes strings/array into PHYSICAL backing and stores
-     * CANONICAL VIRTUAL argv pointers + returns virtual RSP.
-     * pa2va_delta = stack_pa - USER_STACK_BASE (PA − VA region base). */
+    /* ── argv: PHYSICAL write, VIRTUAL pointers ──────────────────────── */
     uint64_t pa2va_delta = stack_pa - USER_STACK_BASE;
     uint64_t init_rsp    = sam_build_args(stack_pa + TASK_CODE_SIZE,
                                           pa2va_delta, argv, argc);
 
-    /* Initialize TCB — execution state is CANONICAL VIRTUAL only */
+    /* ── Sprint 25H: mapping audit is the LAST fallible check ────────── */
+    int aud = sam_audit_user_pd(user_cr3, code_pa, stack_pa);
+    if (g_inject_audit_fail_once) {          /* deterministic failure hook */
+        g_inject_audit_fail_once = 0;
+        aud = 0;
+        serial_puts("     [inject] Sprint 25H audit failure injected\n");
+    }
+    if (!aud) {
+        /* Transactional rollback: the scheduler has seen NOTHING.
+         * Slot stays FREE, g_ntasks untouched, no schedulable partial
+         * task exists. Backing is already zeroized+partially loaded —
+         * the next create re-zeroizes before use. Page-table pages for
+         * this CR3 are leaked by policy (documented). */
+        serial_puts("     [FAIL] create rolled back: PD audit failed\n");
+        return -1;
+    }
+
+    /* ── Single publish point: FREE → READY ──────────────────────────── */
     g_tasks[slot].frame.rip = entry;      /* canonical VA */
     g_tasks[slot].cr3         = user_cr3;
     g_tasks[slot].started     = 0;
-    g_tasks[slot].state       = TASK_READY;
     g_tasks[slot].exit_code   = 0;
     g_tasks[slot].init_rsp    = init_rsp; /* canonical VA */
     g_tasks[slot].code_pa     = code_pa;
@@ -666,7 +768,7 @@ static int sam_task_create(const char *name, char **argv, int argc) {
     for (int i = 0; i < 31 && name[i]; i++) g_tasks[slot].name[i] = name[i];
     g_tasks[slot].name[31] = '\0';
 
-    g_ntasks++;
+    sam_task_set_state(slot, TASK_READY);   /* atomic FREE → READY publish */
 
     serial_puts("     [OK] Sprint 24: task ");
     serial_putdec(slot);
@@ -681,7 +783,7 @@ static int sam_task_create(const char *name, char **argv, int argc) {
     serial_puthex(stack_pa);
     serial_puts("\n");
 
-    return aud ? slot : -2;   /* -2: created but PD audit failed (defensive) */
+    return slot;   /* Sprint 25H: transactional — failure never publishes */
 }
 
 /* Run all resident tasks round-robin until all have exited/faulted.
@@ -708,7 +810,7 @@ static int sam_task_run_loop(void) {
                  * (argv-adjusted); saved cpu_frame_t becomes authoritative
                  * only after the first preemption snapshots over it. */
                 sam_task_mark_start(g_cur);
-                g_tasks[g_cur].state = TASK_RUNNING;
+                sam_task_set_state(g_cur, TASK_RUNNING);
                 serial_puts("     [dispatch] task ");
                 serial_putdec((uint64_t)g_cur);
                 serial_puts(" started\n");
@@ -717,7 +819,7 @@ static int sam_task_run_loop(void) {
                                g_tasks[g_cur].cr3);
             } else {
                 /* Resume after preemption: saved frame is authoritative */
-                g_tasks[g_cur].state = TASK_RUNNING;
+                sam_task_set_state(g_cur, TASK_RUNNING);
                 serial_puts("     [resume] task ");
                 serial_putdec((uint64_t)g_cur);
                 serial_puts("\n");
@@ -727,12 +829,15 @@ static int sam_task_run_loop(void) {
         }
 
         /* Longjmp landed here: exit or fault (preempt never longjmps).
-         * Sprint 25: sam_task_terminate() in the dispatcher already set
-         * ZOMBIE + reason/code, re-parented orphans and possibly woke
-         * AND REAPPED this victim (state now TASK_FREE). The await point
-         * is therefore bookkeeping-only and must be idempotent. */
+         * Sprint 25H invariant: the interrupt gate cleared IF on entry and
+         * __builtin_longjmp does NOT restore RFLAGS — without the explicit
+         * restore below, the orchestrator (and every later HLT-based wait,
+         * e.g. ps2_wait_char in the wizard path) would run with interrupts
+         * disabled forever after the first user task terminated. This is
+         * THE lifecycle boundary where orchestration resumes. */
         uint64_t kcr3 = sam_kernel_cr3;
         __asm__ volatile ("movq %0, %%cr3" :: "r"(kcr3));
+        sam_orchestrator_irq_restore();   /* orchestrator runs with IF=1 */
 
         /* g_task_end_reason is EXIT or FAULT */
         if (g_task_end_reason == TASK_END_EXIT) clean++;
@@ -760,14 +865,14 @@ static int sam_task_run_loop(void) {
         /* loop continues, will hit setjmp==0 path and resume next */
     }
 
-    /* Full drain cleanup */
+    /* Full drain cleanup — helper keeps accounting exact (incl. stranded
+     * WAITING/ZOMBIE slots, which are reclaimed here by policy). */
     g_cur = -1;
-    g_ntasks = 0;
     for (int i = 0; i < SAM_MAX_TASKS; i++) {
-        if (g_tasks[i].state != TASK_FREE) {
-            g_tasks[i].state = TASK_FREE;
-        }
+        if (g_tasks[i].state != TASK_FREE)
+            sam_task_set_state(i, TASK_FREE);
     }
+    sam_ntasks_sane("drain");
     return clean;
 }
 
