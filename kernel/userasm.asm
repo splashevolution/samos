@@ -79,15 +79,28 @@ _user_halt:
     jmp .halt
 
 ; ============================================================
-; sam_user_resume(rdi = &saved cpu_frame, rsi = task CR3)
-; Sprint 20: restore a preempted ring-3 task — full register frame,
-; then iretq back to exactly where the timer caught it.
+; sam_user_resume(rdi = &saved cpu_frame, rsi = task CR3, rdx = &fpu ctx)
+; Sprint 20/25H: restore a preempted ring-3 task — FPU/SIMD state first,
+; then CR3, then the full integer frame, then iretq. The extended-state
+; load is the FIRST instruction after entry: nothing (C or otherwise) can
+; run between fxrstor and iretq, closing every scheduling window.
 ;
 ; cpu_frame_t layout (quad offsets):
 ;   r15 r14 r13 r12 r11 r10 r9 r8 rbp rdi rsi rdx rcx rbx rax
 ;   vector error rip cs rflags rsp ss
 ; ============================================================
+extern g_use_xsave
 sam_user_resume:
+    mov rcx, rdx                ; fpu context buffer
+    cmp byte [rel g_use_xsave], 0
+    jne .fx
+    fxrstor [rcx]
+    jmp .cr3
+.fx:
+    mov eax, 0xFFFFFFFF
+    mov edx, 0xFFFFFFFF
+    xrstor [rcx]
+.cr3:
     mov rcx, rdi                ; frame base
     mov rax, rsi
     mov cr3, rax                ; switch into the task address space

@@ -52,7 +52,8 @@
 extern void _syscall80(void);
 extern void _user_exit(void);
 extern void _user_halt(void);
-extern void sam_user_resume(const cpu_frame_t *frame, uint64_t cr3);
+extern void sam_user_resume(const cpu_frame_t *frame, uint64_t cr3,
+                            void *fpu_ctx);
 
 /* Kernel stack pointer saved by _user_enter, consumed by _user_exit.
  * RBP cannot be listed as an asm clobber (GCC rejects it), so it is
@@ -122,8 +123,11 @@ int       g_ntasks      = 0;        /* count of non-FREE slots            */
 int       g_cur         = -1;       /* currently scheduled index (-1=none) */
 int       g_end_idx     = -1;       /* task that exited/faulted           */
 uint64_t  g_exit_code   = 0;        /* Sprint 22: exit(code) of last end  */
+uint64_t  g_exit_pid    = 0;        /* Sprint 25H: WHO exited last (verdict binding) */
 uint64_t  g_preempt_count = 0;      /* total preemptions                  */
-uint64_t  g_tick_count  = 0;        /* PIT ticks since boot               */
+volatile uint64_t  g_tick_count  = 0;        /* PIT ticks since boot
+                                              * (async-modified by ISR — must be volatile or
+                                              *  straight-line C readers may cache stale values) */
 uint64_t  g_quantum     = 0;        /* ticks used in current slice        */
 #define SAM_QUANTUM_TICKS 3         /* ~30 ms slices @ 100 Hz             */
 
@@ -134,6 +138,60 @@ int g_max_pid_seen = 0;            /* Sprint 25: slot-reuse/new-PID evidence  */
 int g_acct_broken = 0;             /* Sprint 25H: set if accounting ever drifts */
 int g_inject_audit_fail_once = 0;  /* Sprint 25H: deterministic create-failure hook */
 int g_pit_live_fail = 0;           /* Sprint 25H: post-drain PIT liveness check */
+uint64_t g_reap_count = 0;         /* Sprint 25H: total reaps (order-free verdicts) */
+
+/* ── Sprint 25H: FPU/SIMD extended-context storage ──────────────────────
+ * Per-slot fixed region in the free gap below user space (64 B-aligned,
+ * 4 KiB per slot — comfortably above max XSAVE size on target CPUs).
+ * Policy: kernel code does NOT use SIMD while any task is resident, so
+ * the only live extended state belongs to the current task; it is saved
+ * on every switch and restored for every dispatch. Virgin tasks get an
+ * initialized legacy state (FCW/MXCSR) instead of stale registers. */
+#define SAM_EXT_BASE 0x18900000UL
+#define SAM_EXT_SLOT 4096
+int g_fpu_ok   = 0;                /* backing validated at boot */
+int g_use_xsave = 0;               /* XSAVE/XRSTOR when OSXSAVE present */
+
+static inline void *sam_ext_ctx(int slot) {
+    return (void *)(uintptr_t)(SAM_EXT_BASE + (uint64_t)slot * SAM_EXT_SLOT);
+}
+static void __attribute__((unused)) sam_fpu_save_dbg_unused(int slot) {
+    void *c = sam_ext_ctx(slot);
+    if (g_use_xsave)
+        __asm__ volatile ("xsave %0" :: "m"(*(char *)c), "d"(0xFFFFFFFFu), "a"(0xFFFFFFFFu));
+    else
+        __asm__ volatile ("fxsave %0" :: "m"(*(char *)c));
+}
+static void __attribute__((unused)) sam_fpu_restore(int slot) {
+    if (!g_fpu_ok) return;
+    void *c = sam_ext_ctx(slot);
+#ifdef SAM_25H_FPU_TRACE
+    {
+        unsigned long long *q = (unsigned long long *)c;
+        serial_puts("     [fpu] restore s"); serial_putdec(slot);
+        serial_puts(" q0="); serial_puthex(q[20]);   /* XMM0 low  @320 */
+        serial_puts(" q1="); serial_puthex(q[21]);   /* XMM0 high @328 */
+        serial_puts("\n");
+    }
+#endif
+    if (g_use_xsave)
+        __asm__ volatile ("xrstor %0" :: "m"(*(char *)c), "d"(0xFFFFFFFFu), "a"(0xFFFFFFFFu));
+    else
+        __asm__ volatile ("fxrstor %0" :: "m"(*(char *)c));
+}
+static void sam_fpu_virgin(int slot) {
+    if (!g_fpu_ok) return;
+    char *c = (char *)sam_ext_ctx(slot);
+    for (int i = 0; i < SAM_EXT_SLOT; i++) c[i] = 0;
+    *(uint16_t *)(c + 0)  = 0x037F;      /* FCW: all masks set            */
+    *(uint32_t *)(c + 24) = 0x1F80;      /* MXCSR @24: mask all, rnd-near */
+    if (g_use_xsave)
+        __asm__ volatile ("xrstor %0" :: "m"(*(char *)c), "d"(0), "a"(0));
+    else {
+        __asm__ volatile ("fxrstor %0" :: "m"(*(char *)c));
+        __asm__ volatile ("ldmxcsr %0" :: "m"(*(const uint32_t *)(c + 24)));
+    }
+}
 
 /* Sprint 25H error codes shared by syscalls taking user memory */
 #define SYS_E_BADFD   (-7)
@@ -232,14 +290,29 @@ static void sam_scheduler_tick(cpu_frame_t *f) {
             /* Never-dispatched task? Synthesize its initial frame
              * (rip/init_rsp/cs/ss/rflags) exactly as the old inline tick did.
              * Without this, resuming a zeroed frame faults (#GP). */
-            if (!g_tasks[next].started)
+            int virgin = !g_tasks[next].started;
+            if (virgin)
                 sam_task_mark_start(next);
+#ifdef SAM_25H_FPU_TRACE
+            /* dump what the trap stub captured for the OUTGOING task */
+            {
+                unsigned long long *q=(unsigned long long *)sam_ext_ctx(g_cur);
+                serial_puts("     [fpu] saved   s"); serial_putdec(g_cur);
+                serial_puts(" q0="); serial_puthex(q[20]);
+                serial_puts("\n");
+            }
+#endif
+            /* extended state already saved by the trap stub (25H) */
             g_cur = next;
             sam_task_set_state(next, TASK_RUNNING);
             serial_puts("     [tick] preempted, resuming task ");
             serial_putdec((uint64_t)next);
             serial_puts("\n");
-            sam_user_resume(&g_tasks[next].frame, g_tasks[next].cr3);
+            /* Sprint 25H: extended state loads INSIDE resume asm,
+             * immediately adjacent to iretq — no window remains. */
+            if (virgin) sam_fpu_virgin(next);
+            sam_user_resume(&g_tasks[next].frame, g_tasks[next].cr3,
+                            sam_ext_ctx(next));
             /* sam_user_resume never returns here (iretq into the task) */
         } else {
             /* next == g_cur (single runnable) or next == -1:
@@ -339,6 +412,7 @@ static int sam_pick_ready(int exclude) {
 static void sam_task_terminate(int vidx, uint32_t reason, uint64_t code) {
     sam_tcb_t *v = &g_tasks[vidx];
     sam_task_set_state(vidx, TASK_ZOMBIE);
+    g_exit_pid  = v->pid;     /* Sprint 25H: verdicts bind to PID, not order */
     v->term_reason = reason;
     v->exit_code   = code;
     g_exit_code    = code;
@@ -371,7 +445,7 @@ static void sam_task_terminate(int vidx, uint32_t reason, uint64_t code) {
         p->frame.rax = (uint64_t)v->pid;
         sam_task_set_state(w, TASK_READY);
         sam_task_set_state(vidx, TASK_FREE);          /* reap only AFTER status/rax */
-        sam_ntasks_sane("wake-reap");
+        g_reap_count++; sam_ntasks_sane("wake-reap");
         break;
     }
 }
@@ -477,9 +551,20 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
         uint64_t len = f->rdx;
         if (f->rdi != 1)            { f->rax = (uint64_t)(int64_t)SYS_E_BADFD;  break; }
         if (len == 0)               { f->rax = 0; break; }
-        if (!buf || !sam_uva_range_ok((uint64_t)(uintptr_t)buf, len))
-                                    { f->rax = (uint64_t)(int64_t)WPID_E_BADPTR; break; }
+        /* Cheapest rejects first: a caller-controlled length beyond the
+         * documented per-call maximum is refused without any address
+         * arithmetic; only then is the full buffer range validated. */
         if (len > SAM_WRITE_MAX)    { f->rax = (uint64_t)(int64_t)SYS_E_TOOBIG;  break; }
+        if (!buf || !sam_uva_range_ok((uint64_t)(uintptr_t)buf, len)) {
+#ifdef SAM_25H_DBG
+            serial_puts("     [dbg] write reject buf=");
+            serial_puthex((uint64_t)(uintptr_t)buf);
+            serial_puts(" len="); serial_putdec(len);
+            serial_puts(" rngok="); serial_putdec((uint64_t)sam_uva_range_ok((uint64_t)(uintptr_t)buf,len));
+            serial_puts("\n");
+#endif
+            f->rax = (uint64_t)(int64_t)WPID_E_BADPTR; break;
+        }
         for (uint64_t i = 0; i < len; i++)
             serial_putchar(buf[i]);
         f->rax = len;
@@ -567,6 +652,7 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
             serial_puts(" freed)\n");
             f->rax = (uint64_t)v->pid;
             sam_task_set_state(zomb, TASK_FREE);
+            g_reap_count++;
             sam_ntasks_sane("immediate-reap");
             break;
         }
@@ -589,13 +675,17 @@ static uint64_t sam_syscall_handler(cpu_frame_t *f) {
         if (spid > 0) me->frame.rax = (uint64_t)(uint32_t)spid; /* preset  */
         sam_task_set_state(g_cur, TASK_WAITING);
 
-        if (!g_tasks[nxt].started) sam_task_mark_start(nxt);
+        int virgin2 = !g_tasks[nxt].started;
+        if (virgin2) sam_task_mark_start(nxt);
+        /* extended state of the blocker saved by its own syscall trap */
         g_cur = nxt;
         sam_task_set_state(nxt, TASK_RUNNING);
         serial_puts("     [run] successor task ");
         serial_putdec((uint64_t)nxt);
         serial_puts(" dispatched from syscall context\n");
-        sam_user_resume(&g_tasks[nxt].frame, g_tasks[nxt].cr3);
+        if (virgin2) sam_fpu_virgin(nxt);
+        sam_user_resume(&g_tasks[nxt].frame, g_tasks[nxt].cr3,
+                        sam_ext_ctx(nxt));
         __builtin_unreachable();   /* noreturn — no fall-through to default */
         }
 
@@ -718,7 +808,7 @@ static int sam_task_create(const char *name, char **argv, int argc) {
     uint64_t entry = 0;
     int er = elf_load_pa(stage, (uint32_t)got, &entry, code_pa);
     if (er != 0) {
-        serial_puts("     [FAIL] elf_load_pa("); serial_puts(name);
+        serial_puts("     [reject] elf_load_pa("); serial_puts(name);
         serial_puts(") error: "); serial_putdec((uint64_t)(-er)); serial_puts("\n");
         return -1;
     }
@@ -748,7 +838,7 @@ static int sam_task_create(const char *name, char **argv, int argc) {
          * task exists. Backing is already zeroized+partially loaded —
          * the next create re-zeroizes before use. Page-table pages for
          * this CR3 are leaked by policy (documented). */
-        serial_puts("     [FAIL] create rolled back: PD audit failed\n");
+        serial_puts("     [reject] create rolled back: PD audit failed\n");
         return -1;
     }
 
@@ -808,22 +898,27 @@ static int sam_task_run_loop(void) {
             if (g_tasks[g_cur].started == 0) {
                 /* First dispatch: mark_start builds frame with init_rsp
                  * (argv-adjusted); saved cpu_frame_t becomes authoritative
-                 * only after the first preemption snapshots over it. */
+                 * only after the first preemption snapshots over it.
+                 * 25H: the previously-running task died (exit/fault), so
+                 * its extended state is abandoned — virgin init only. */
                 sam_task_mark_start(g_cur);
                 sam_task_set_state(g_cur, TASK_RUNNING);
                 serial_puts("     [dispatch] task ");
                 serial_putdec((uint64_t)g_cur);
                 serial_puts(" started\n");
+                sam_fpu_virgin(g_cur);
                 sam_user_enter(g_tasks[g_cur].frame.rip,
                                g_tasks[g_cur].frame.rsp,
                                g_tasks[g_cur].cr3);
             } else {
-                /* Resume after preemption: saved frame is authoritative */
+                /* Resume after preemption: saved frame is authoritative;
+                 * 25H: extended state was saved by whoever switched away */
                 sam_task_set_state(g_cur, TASK_RUNNING);
                 serial_puts("     [resume] task ");
                 serial_putdec((uint64_t)g_cur);
                 serial_puts("\n");
-                sam_user_resume(&g_tasks[g_cur].frame, g_tasks[g_cur].cr3);
+                sam_user_resume(&g_tasks[g_cur].frame, g_tasks[g_cur].cr3,
+                                sam_ext_ctx(g_cur));
             }
             __builtin_unreachable();
         }

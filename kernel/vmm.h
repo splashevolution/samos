@@ -47,6 +47,11 @@ extern uint64_t pd_table0[512];
 
 static uint64_t vmm_bump = VMM_POOL_BASE;
 
+/* Sprint 25H: lifetime telemetry — finite pool, documented exhaustion. */
+static uint64_t sam_vmm_remaining(void) {
+    return (VMM_POOL_BASE + VMM_POOL_SIZE) - vmm_bump;
+}
+
 /* ── Allocate one zeroed 4 KiB page-table page ────────────────────────── */
 static void *vmm_alloc_pt(void) {
     if (vmm_bump + 0x1000 > VMM_POOL_BASE + VMM_POOL_SIZE) return 0;

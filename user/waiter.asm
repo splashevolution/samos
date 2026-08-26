@@ -111,26 +111,34 @@ do_wait:
     test r10, r10
     jz report_fail
 
-    ; ---- validate status word vs argv[5] reason (code implied) ----
+    ; ---- validate status: argv[5] reason + optional argv[6] code ----
     lea r9, [rel stbuf]
     mov r9, [r9]
     mov rax, r9
     shr rax, 32                 ; observed reason
     mov rsi, [r12+40]
     call parse_dec              ; expected reason
-    cmp rax, 0
-    jne .exp_fault
-    ; expect EXIT: code must be 0
-    mov eax, r9d                ; low 32 bits (zero-extend)
-    test eax, eax
-    jnz report_fail
-    jmp wait_ok
-.exp_fault:
-    ; expect FAULT: reason 1, code == vector 14
-    cmp rax, 1
+    mov ebx, eax                ; save expected reason
+    ; expected code: argc>=7 ? parse(argv[6]) : (reason? 14 : 0)
+    mov rax, [rsp]              ; argc
+    cmp rax, 7
+    jl .def_code
+    mov rsi, [r12+48]
+    call parse_dec
+    jmp .have_code
+.def_code:
+    xor eax, eax
+    test ebx, ebx
+    jz .have_code
+    mov eax, 14
+.have_code:
+    mov edx, eax                ; expected code
+    mov rax, r9
+    shr rax, 32
+    cmp rax, rbx                ; observed reason == expected reason
     jne report_fail
-    mov eax, r9d
-    cmp eax, 14
+    mov eax, r9d                ; observed code (zero-extend)
+    cmp eax, edx                ; observed code == expected code
     jne report_fail
 
 wait_ok:

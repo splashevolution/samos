@@ -115,6 +115,11 @@ LOOP_ELF   := $(BUILD)/loop.elf
 LOOPS_ELF  := $(BUILD)/loops.elf
 PROBEB_ELF := $(BUILD)/probeb.elf
 WAITER_ELF := $(BUILD)/waiter.elf
+ABUSE_ELF  := $(BUILD)/abuse.elf
+FAULTY_ELF := $(BUILD)/faulty.elf
+CANARY_ELF := $(BUILD)/canary.elf
+SIMTEST_ELF:= $(BUILD)/simtest.elf
+BAD_ELFS   := $(addprefix $(BUILD)/,bad1.elf bad2.elf bad3.elf bad4.elf bad5.elf bad6.elf)
 ECHO_ELF   := $(BUILD)/echo.elf
 INITRD     := $(BUILD)/initrd.tar
 
@@ -150,12 +155,37 @@ $(BUILD)/waiter.elf: user/waiter.asm | $(BUILD)
 	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
 	    $(BUILD)/waiter.o -o $@
 
+# Sprint 25H: adversarial/boundary/negative-test binaries
+$(BUILD)/abuse.elf: user/abuse.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/abuse.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/abuse.o -o $@
+
+$(BUILD)/faulty.elf: user/faulty.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/faulty.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/faulty.o -o $@
+
+$(BUILD)/canary.elf: user/canary.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/canary.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/canary.o -o $@
+
+$(BUILD)/simtest.elf: user/simtest.asm | $(BUILD)
+	nasm -f elf64 -o $(BUILD)/simtest.o $<
+	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
+	    $(BUILD)/simtest.o -o $@
+
+# Sprint 25H: malformed ELF fixtures (must all be rejected by the loader)
+$(BAD_ELFS): tools/make_badelf.py | $(BUILD)
+	python3 tools/make_badelf.py --out $(BUILD)
+
 $(BUILD)/echo.elf: user/echo.asm | $(BUILD)
 	nasm -f elf64 -o $(BUILD)/echo.o $<
 	ld -m elf_x86_64 -nostdlib -T user/linker.ld -e start -z noseparate-code \
 	    $(BUILD)/echo.o -o $@
 
-$(INITRD): $(GUARD_ELF) $(HELLO_ELF) $(LOOP_ELF) $(LOOPS_ELF) $(PROBEB_ELF) $(WAITER_ELF) $(ECHO_ELF) | $(BUILD)
+$(INITRD): $(GUARD_ELF) $(HELLO_ELF) $(LOOP_ELF) $(LOOPS_ELF) $(PROBEB_ELF) $(WAITER_ELF) $(ABUSE_ELF) $(FAULTY_ELF) $(CANARY_ELF) $(SIMTEST_ELF) $(BAD_ELFS) $(ECHO_ELF) | $(BUILD)
 	rm -rf $(BUILD)/initrd
 	mkdir -p $(BUILD)/initrd
 	cp $(GUARD_ELF) $(BUILD)/initrd/guard.elf
@@ -164,8 +194,18 @@ $(INITRD): $(GUARD_ELF) $(HELLO_ELF) $(LOOP_ELF) $(LOOPS_ELF) $(PROBEB_ELF) $(WA
 	cp $(LOOPS_ELF) $(BUILD)/initrd/loops.elf
 	cp $(PROBEB_ELF) $(BUILD)/initrd/probeb.elf
 	cp $(WAITER_ELF) $(BUILD)/initrd/waiter.elf
+	cp $(ABUSE_ELF)  $(BUILD)/initrd/abuse.elf
+	cp $(FAULTY_ELF) $(BUILD)/initrd/faulty.elf
+	cp $(CANARY_ELF) $(BUILD)/initrd/canary.elf
+	cp $(SIMTEST_ELF) $(BUILD)/initrd/simtest.elf
+	cp $(BUILD)/bad1.elf  $(BUILD)/initrd/bad1.elf
+	cp $(BUILD)/bad2.elf  $(BUILD)/initrd/bad2.elf
+	cp $(BUILD)/bad3.elf  $(BUILD)/initrd/bad3.elf
+	cp $(BUILD)/bad4.elf  $(BUILD)/initrd/bad4.elf
+	cp $(BUILD)/bad5.elf  $(BUILD)/initrd/bad5.elf
+	cp $(BUILD)/bad6.elf  $(BUILD)/initrd/bad6.elf
 	cp $(ECHO_ELF)  $(BUILD)/initrd/echo.elf
-	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf loop.elf loops.elf probeb.elf waiter.elf echo.elf
+	tar --format=ustar -cf $@ -C $(BUILD)/initrd guard.elf hello.elf loop.elf loops.elf probeb.elf waiter.elf abuse.elf faulty.elf canary.elf simtest.elf bad1.elf bad2.elf bad3.elf bad4.elf bad5.elf bad6.elf echo.elf
 
 $(ISO): $(KERNEL) $(GGUF_FILE) $(STF_FILE) $(INITRD) | $(GRUB_DIR)
 	cp $(KERNEL)    $(BOOT_DIR)/$(TARGET).elf

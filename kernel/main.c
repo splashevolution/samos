@@ -622,6 +622,28 @@ void kernel_main(uint32_t multiboot_magic, uint64_t multiboot_info)
         vga_puts(" slots\n", VGA_GREEN);
     }
 
+    /* Sprint 25H: extended (FPU/SIMD) context backing + policy.
+     * XSAVE class is used only when OSXSAVE is live; otherwise FXSAVE
+     * covers x87+SSE, which matches what this CR0/CR4 config exposes. */
+    {
+        int usable_ext = sam_e820_range_usable(SAM_EXT_BASE,
+                                    (uint64_t)SAM_MAX_TASKS * SAM_EXT_SLOT);
+        if (usable_ext) {
+            uint32_t ecx = cpuid(1, 0).ecx;
+            int osxsave = (ecx >> 26) & 1;   /* OSXSAVE feature */
+            int have_x  = (ecx >> 26) & 1 ? ((ecx >> 27) & 1) : 0;
+            g_fpu_ok   = 1;
+            g_use_xsave = have_x && osxsave;
+        } else {
+            g_fpu_ok = 0;
+            serial_puts("[WARN] 25H: no E820 room for SIMD context store\n");
+        }
+        serial_puts("[OK] 25H: FPU/SIMD context ");
+        if (!g_fpu_ok)      serial_puts("DISABLED (no backing)\n");
+        else if (g_use_xsave) serial_puts("preserved via XSAVE\n");
+        else                  serial_puts("preserved via FXSAVE (x87+SSE)\n");
+    }
+
     /* 3. Allocate three PSL-style memory domains (Sprint 8 adds GENERAL) */
     vga_puts("\n[OK] Allocating memory domains:\n", VGA_GREEN);
     serial_puts("\n[OK] Allocating memory domains:\n");
@@ -1452,6 +1474,192 @@ sprint16_ok = 1;
                     sam_task_run_loop();   /* drain the evidence task */
                 } else { sprint25_ok = 0;
                     serial_puts("     [FAIL] Sprint 25 C: reuse create\n"); }
+            }
+
+            /* ============================================================
+             * Sprint 25H: boundary / rollback / containment / remanence /
+             * SIMD-context battery. Every verdict binds to a specific
+             * task's PID + exit code or to batch fault counters — never
+             * to last-writer global state alone.
+             * ============================================================ */
+            serial_puts("\n     --- Sprint 25H: hardening battery ---\n");
+            {
+                volatile int h_ok = 1;
+
+                /* ---- E: transactional create rollback (audit injection) -- */
+                {
+                    int pre = g_ntasks;
+                    g_inject_audit_fail_once = 1;
+                    int s = sam_task_create("/hello.elf", 0, 0);
+                    int phantom = 0;
+                    for (int i = 0; i < SAM_MAX_TASKS; i++)
+                        if (g_tasks[i].state != TASK_FREE) phantom = 1;
+                    if (s < 0 && g_ntasks == pre && !phantom) {
+                        serial_puts("     [PASS] 25H: injected audit failure rolled back cleanly\n");
+                    } else {
+                        serial_puts("     [FAIL] 25H: create rollback left state\n");
+                        h_ok = 0;
+                    }
+                }
+
+                /* ---- G: malformed ELF fixtures must all be rejected ----- */
+                {
+                    const char *badn[6] = { "/bad1.elf", "/bad2.elf", "/bad3.elf",
+                                            "/bad4.elf", "/bad5.elf", "/bad6.elf" };
+                    int rejected = 0;
+                    for (int i = 0; i < 6; i++)
+                        if (sam_task_create(badn[i], 0, 0) < 0) rejected++;
+                    if (rejected == 6) {
+                        serial_puts("     [PASS] 25H: all 6 malformed ELFs rejected\n");
+                    } else {
+                        serial_puts("     [FAIL] 25H: malformed ELF accepted ");
+                        serial_putdec((uint64_t)rejected); serial_puts("/6\n");
+                        h_ok = 0;
+                    }
+                }
+
+                /* ---- B: SYS_WRITE adversarial boundary probes ----------- */
+                {
+                    uint64_t r0 = g_reap_count;
+                    int s = sam_task_create("/abuse.elf", 0, 0);
+                    int cl = s >= 0 ? sam_task_run_loop() : -1;
+                    if (cl == 1 && g_last_batch_faults == 0 &&
+                        g_exit_code == 0 && g_reap_count == r0) {
+                        serial_puts("     [PASS] 25H: write() boundary probes passed\n");
+                    } else {
+                        serial_puts("     [FAIL] 25H: write probes clean=");
+                        serial_putdec((uint64_t)cl);
+                        serial_puts(" exit="); serial_putdec(g_exit_code);
+                        serial_puts("\n");
+                        h_ok = 0;
+                    }
+                }
+
+                /* ---- C: CPL3 containment: #DE(0) #UD(6) #GP(13) --------- */
+                {
+                    static const struct { char m; uint64_t vec; } fc[3] =
+                        { { 'D', 0 }, { 'U', 6 }, { 'G', 13 } };
+                    static char fmode[2];   fmode[1] = '\0';
+                    for (int i = 0; i < 3; i++) {
+                        fmode[0] = fc[i].m;
+                        char *fv[2] = { (char *)"/faulty.elf", fmode };
+                        int cf = sam_task_create("/faulty.elf", fv, 2);
+                        char *lv[2] = { (char *)"/loops.elf", (char *)"S" };
+                        int cl_ = sam_task_create("/loops.elf", lv, 2);
+                        static char wt[16], wrs[4], wcode[8];
+                        sam_itoa_dec(g_tasks[cf].pid, wt);
+                        sam_itoa_dec(1, wrs);
+                        sam_itoa_dec(fc[i].vec, wcode);
+                        char *wv[7] = { (char *)"/waiter.elf", (char *)"S",
+                                        wt, (char *)"0", wt, wrs, wcode };
+                        int pw = sam_task_create("/waiter.elf", wv, 7);
+                        if (cf < 0 || cl_ < 0 || pw < 0) { h_ok = 0;
+                            serial_puts("     [FAIL] 25H: faulty-batch creates\n"); continue; }
+                        g_tasks[cf].ppid = g_tasks[pw].pid;
+                        uint64_t r0 = g_reap_count;
+                        int cl = sam_task_run_loop();
+                        /* Verdict is order-independent: exactly one reap
+                         * (the parent's), one contained fault (the child),
+                         * both survivors exiting cleanly. A waiter that
+                         * disagrees with the status word raises #UD itself,
+                         * which shows up as a second fault. */
+                        if (cl == 2 && g_last_batch_faults == 1 &&
+                            g_reap_count - r0 == 1) {
+                            serial_puts("     [PASS] 25H: CPL3 vector ");
+                            serial_putdec(fc[i].vec);
+                            serial_puts(" contained; survivor ran; parent reaped FAULT\n");
+                        } else {
+                            serial_puts("     [FAIL] 25H: vector ");
+                            serial_putdec(fc[i].vec);
+                            serial_puts(" clean="); serial_putdec((uint64_t)cl);
+                            serial_puts(" faults="); serial_putdec(g_last_batch_faults);
+                            serial_puts("\n");
+                            h_ok = 0;
+                        }
+                    }
+                }
+
+                /* ---- D: sequential data remanence (canary) -------------- */
+                {
+                    char *wv[2] = { (char *)"/canary.elf", (char *)"W" };
+                    int cw = sam_task_create("/canary.elf", wv, 2);
+                    int cl = cw >= 0 ? sam_task_run_loop() : -1;
+                    if (cl != 1 || g_exit_code != 0) { h_ok = 0;
+                        serial_puts("     [FAIL] 25H: canary W phase\n"); }
+                    char *rv[2] = { (char *)"/canary.elf", (char *)"R" };
+                    int cr = sam_task_create("/canary.elf", rv, 2);
+                    cl = cr >= 0 ? sam_task_run_loop() : -1;
+                    if (cl == 1 && g_exit_code == 0) {
+                        serial_puts("     [PASS] 25H: reused backing exposes no predecessor data\n");
+                    } else {
+                        serial_puts("     [FAIL] 25H: REMANENCE detected clean=");
+                        serial_putdec((uint64_t)cl); serial_puts("\n");
+                        h_ok = 0;
+                    }
+                }
+
+                /* ---- I: SIMD context preservation under preemption ------ */
+                {
+                    char *av[2] = { (char *)"/simtest.elf", (char *)"A" };
+                    char *bv[2] = { (char *)"/simtest.elf", (char *)"B" };
+                    int sa = sam_task_create("/simtest.elf", av, 2);
+                    int sb = sam_task_create("/simtest.elf", bv, 2);
+                    int cl = (sa >= 0 && sb >= 0) ? sam_task_run_loop() : -1;
+                    if (cl == 2 && g_last_batch_faults == 0) {
+                        serial_puts("     [PASS] 25H: XMM context preserved across preemptions (A+B)\n");
+                    } else {
+                        serial_puts("     [FAIL] 25H: SIMD corruption clean=");
+                        serial_putdec((uint64_t)cl);
+                        serial_puts(" faults="); serial_putdec(g_last_batch_faults);
+                        serial_puts("\n");
+                        h_ok = 0;
+                    }
+                }
+
+                /* ---- M: post-churn kernel integrity --------------------- */
+                {
+                    volatile uint32_t *ai  = (volatile uint32_t *)(uintptr_t)(bcfg.ai_base + 0x20000UL);
+                    volatile uint32_t *gm  = (volatile uint32_t *)(uintptr_t)(bcfg.game_base + 0x2000UL);
+                    volatile uint32_t *gn  = (volatile uint32_t *)(uintptr_t)(bcfg.general_base);
+                    *ai = 0x5A1005A1; uint32_t rai = *ai;
+                    *gm = 0x5A106A1E; uint32_t rgm = *gm;
+                    *gn = 0x5A10600E; uint32_t rgn = *gn;
+
+                    uint64_t t0 = g_tick_count;
+                    for (volatile uint64_t d = 0; d < 30000000ULL; d++) { }
+                    uint64_t dt = g_tick_count - t0;
+                    uint64_t fl = sam_read_rflags();
+
+                    int r = sam_run_task_legacy("/guard.elf", 0, 0);
+
+                    if (rai == 0x5A1005A1 && rgm == 0x5A106A1E && rgn == 0x5A10600E &&
+                        dt > 0 && ((fl >> 9) & 1) &&
+                        r == TASK_END_FAULT && g_last_batch_faults == 1) {
+                        serial_puts("     [PASS] 25H post-churn: sentinels OK, IF=1, PIT live (+");
+                        serial_putdec(dt);
+                        serial_puts(" ticks), isolation re-proven\n");
+                    } else {
+                        serial_puts("     [FAIL] 25H post-churn:");
+                        serial_puts(" sent=");
+                        serial_putdec((uint64_t)(rai == 0x5A1005A1) +
+                                      (rgm == 0x5A106A1E) + (rgn == 0x5A10600E));
+                        serial_puts(" dt=");   serial_putdec(dt);
+                        serial_puts(" IF=");   serial_putdec((fl >> 9) & 1);
+                        serial_puts(" r=");    serial_putdec((uint64_t)r);
+                        serial_puts(" flt=");  serial_putdec(g_last_batch_faults);
+                        serial_puts("\n");
+                        h_ok = 0;
+                    }
+                }
+
+                /* ---- N: VMM lifetime telemetry --------------------------- */
+                serial_puts("     [OK] 25H VMM pool remaining ");
+                serial_putdec(sam_vmm_remaining() / 1024);
+                serial_puts(" KiB of 4096 KiB (12 KiB leaked per address space)\n");
+
+                if (!h_ok) sprint25_ok = 0;
+                if (g_acct_broken) { sprint25_ok = 0;
+                    serial_puts("     [FAIL] 25H: task accounting drifted during battery\n"); }
             }
         }
     }

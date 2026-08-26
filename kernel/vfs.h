@@ -17,7 +17,7 @@
 
 #include <stdint.h>
 
-#define VFS_MAX_FILES 16
+#define VFS_MAX_FILES 24   /* Sprint 25H: headroom for adversarial fixtures */
 #define VFS_NAME_MAX  100
 
 typedef struct {

@@ -185,7 +185,32 @@ extern void _syscall80(void);
 __asm__ ( \
 ".text\n\t" \
 /* ── Shared save/restore/call/return body ──────────────────────────── */ \
-"_isr_common:\n\t" \
+ "_isr_common:\n\t" \
+    /* Sprint 25H eager FPU/SIMD save for ring-3 origins: capture BEFORE  \
+     * any C runs (GCC may use XMM for struct copies). Ring-0 traps skip. \
+     * Skip paths land at 25:, AFTER this block's private pushes/pops. */ \
+    /* Skip paths land at 25:, AFTER this block's private pushes/pops. */ \
+    "testl $3, 24(%rsp)\n\t"          /* CS quad of interrupted ctx       */ \
+    "je 25f\n\t" \
+    "push %rax\n\t" \
+    "push %rdx\n\t" \
+    "push %rcx\n\t" \
+    "mov g_cur(%rip), %ecx\n\t" \
+    "shl $12, %rcx\n\t"               /* × SAM_EXT_SLOT (4096)            */ \
+    "add $0x18900000, %rcx\n\t"       /* == SAM_EXT_BASE                  */ \
+    "cmpb $0, g_use_xsave(%rip)\n\t" \
+    "jne 24f\n\t" \
+    "fxsave (%rcx)\n\t" \
+    "jmp 26f\n\t" \
+"24:\n\t" \
+    "mov $0xFFFFFFFF, %edx\n\t" \
+    "mov $0xFFFFFFFF, %eax\n\t" \
+    "xsave (%rcx)\n\t" \
+"26:\n\t" \
+    "pop %rcx\n\t" \
+    "pop %rdx\n\t" \
+    "pop %rax\n\t" \
+"25:\n\t" \
     "push %rax\n\t" \
     "push %rbx\n\t" \
     "push %rcx\n\t" \
@@ -212,6 +237,32 @@ __asm__ ( \
     "call sam_interrupt_dispatcher\n\t" \
     "pop %rdi\n\t" \
     "mov %rdi, %rsp\n\t" \
+    /* Sprint 25H reload extended state on SAME-CONTEXT ring-3 return:    \
+     * dispatcher returned => returning to the SAME task (switch paths    \
+     * leave via sam_user_resume/longjmp and never reach this tail).      \
+     * Kernel C clobbers caller-saved XMM freely (frame copies etc.),     \
+     * so reload before iretq. Frame CS = quad 18 -> byte offset 144. */ \
+    "testl $3, 144(%rdi)\n\t" \
+    "je 27f\n\t" \
+    "push %rax\n\t" \
+    "push %rdx\n\t" \
+    "push %rcx\n\t" \
+    "mov g_cur(%rip), %ecx\n\t" \
+    "shl $12, %rcx\n\t"               /* × SAM_EXT_SLOT (4096)            */ \
+    "add $0x18900000, %rcx\n\t"       /* == SAM_EXT_BASE                  */ \
+    "cmpb $0, g_use_xsave(%rip)\n\t" \
+    "jne 28f\n\t" \
+    "fxrstor (%rcx)\n\t" \
+    "jmp 29f\n\t" \
+"28:\n\t" \
+    "mov $0xFFFFFFFF, %edx\n\t" \
+    "mov $0xFFFFFFFF, %eax\n\t" \
+    "xrstor (%rcx)\n\t" \
+"29:\n\t" \
+    "pop %rcx\n\t" \
+    "pop %rdx\n\t" \
+    "pop %rax\n\t" \
+"27:\n\t" \
     /* Restore GP regs */ \
     "pop %r15\n\t" \
     "pop %r14\n\t" \
